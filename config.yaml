@@ -1,0 +1,56 @@
+# ==============================================================================
+# SMARTseq HT scRNA-seq Pipeline Configuration
+# Species: Mouse | Genome: mm10/GRCm39 | Platform: Apple Silicon Mac
+# ==============================================================================
+
+# ── Paths ──────────────────────────────────────────────────────────────────────
+FASTQ_DIR: "/Users/zachortega/Documents/02092026_NOD_CD45_MHCII_RNAseq"
+OUTPUT_DIR: "results"
+REF_DIR: "reference"
+GENOME_DIR: "reference/star_index"
+HISAT2_INDEX: "reference/hisat2_index/GRCm39"
+
+# ── Reference files ────────────────────────────────────────────────────────────
+GENOME_FASTA: "reference/GRCm39.primary_assembly.genome.fa.gz"
+GTF_FILE: "reference/gencode.vM33.primary_assembly.annotation.gtf.gz"
+
+# ── FASTQ naming convention ────────────────────────────────────────────────────
+# Pattern: {CELL_ID}_R1_001.fastq.gz / {CELL_ID}_R2_001.fastq.gz
+# Example: B6G7_A1_S1_L001_R1_001.fastq.gz
+R1_SUFFIX: "_R1_001.fastq.gz"
+R2_SUFFIX: "_R2_001.fastq.gz"
+
+# ── Trimmomatic ────────────────────────────────────────────────────────────────
+TRIM_LEADING: 3
+TRIM_TRAILING: 3
+TRIM_SLIDINGWINDOW: "4:15"
+TRIM_MINLEN: 36
+ADAPTER_FILE: "TruSeq3-PE.fa"
+
+# ── STAR alignment ─────────────────────────────────────────────────────────────
+STAR_THREADS: 6
+STAR_RAM: 16000000000
+STAR_EXTRA_ARGS: "--outSAMtype BAM SortedByCoordinate --outSAMattributes NH HI AS NM"
+
+# ── featureCounts ──────────────────────────────────────────────────────────────
+FC_THREADS: 6
+FC_STRAND: 0
+FC_PAIRED: true
+FC_MIN_MAPQ: 10
+
+# ── DESeq2 differential expression ────────────────────────────────────────────
+METADATA_FILE: "/Users/zachortega/Desktop/MS_SMARTseq_Pipeline/data/metadata.csv"
+# Design includes batch correction (L001 vs L002 plates) + condition + strain
+# condition = cell population (CD45pos_MHCIIpos, CD45neg_MHCIIlo, CD45neg_MHCIIhi)
+# strain    = mouse genotype (NOD, B6G7, B6MHCIIGFP, NODPDL1)
+DESIGN_FORMULA: "~ batch + strain + condition"
+REFERENCE_LEVEL: "CD45pos_MHCIIpos"  # reference condition for DESeq2
+PADJ_THRESHOLD: 0.05
+LFC_THRESHOLD: 1.0
+MIN_COUNTS: 10
+
+# ── QC thresholds ─────────────────────────────────────────────────────────────
+MIN_GENES_DETECTED: 500
+MAX_GENES_DETECTED: 8000
+MIN_READS_MAPPED: 500000
+MIN_MAPPING_RATE: 0.60

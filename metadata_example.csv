@@ -1,0 +1,7 @@
+cell_id,condition,plate,batch
+PLATE1_A01,control,PLATE1,1
+PLATE1_A02,control,PLATE1,1
+PLATE1_A03,control,PLATE1,1
+PLATE1_B01,treatment,PLATE1,1
+PLATE1_B02,treatment,PLATE1,1
+PLATE1_B03,treatment,PLATE1,1

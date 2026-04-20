@@ -1,0 +1,13 @@
+reference/
+*.gz
+*.bam
+*.sam
+*.fastq
+*.fq
+results/
+logs/
+tmp/
+__pycache__/
+*.pyc
+.Rhistory
+.DS_Store

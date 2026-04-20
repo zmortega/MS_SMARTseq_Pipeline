@@ -1,0 +1,13 @@
+There were 16 warnings (use warnings() to see them)
+=== DESeq2 Analysis ===
+Loading counts from: results/04_counts/counts_clean.txt 
+Genes: 56941 | Cells: 372 
+First 3 cell IDs: B6G7_A10_S10_L001, B6G7_A11_S11_L001, B6G7_A12_S12_L001 
+Loading metadata from: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/data/metadata.csv 
+First 3 metadata IDs: B6G7_A1_S1_L001, B6G7_A10_S10_L001, B6G7_A11_S11_L001 
+Cells with metadata: 372 
+Genes after count filter (>=10 total): 0 
+Error in DESeqDataSet(se, design = design, ignoreRank) : 
+  all samples have 0 counts for all genes. check the counting script.
+Calls: DESeqDataSetFromMatrix -> DESeqDataSet
+Execution halted
