@@ -174,6 +174,116 @@ cat("  Filtered count matrix:", ncol(counts), "cells x", nrow(counts), "genes
 
 ")
 
+
+# ==============================================================================
+# MCA correlation helper: uses clustifyrdata::ref_MCA (no compilation needed)
+# Computes Pearson r between each cluster's mean VST profile and all 713
+# Mouse Cell Atlas cell types. Returns ranked Excel workbook.
+# ==============================================================================
+run_mca_correlation <- function(expr_mat, cluster_vec_input, cluster_levels_input,
+                                  to_sym_fn, out_path, label="combined") {
+  # Download ref_MCA — try multiple sources
+  ref_mca_cache <- "/tmp/ref_MCA.rda"
+  ref_mca_urls  <- c(
+    "https://github.com/rnabioco/clustifyrdata/raw/main/data/ref_MCA.rda",
+    "https://github.com/rnabioco/scRNA-seq-Cell-Ref-Matrix/raw/master/atlas/musMusculus/MouseAtlas.rda"
+  )
+  if (!file.exists(ref_mca_cache) || file.size(ref_mca_cache) < 1000) {
+    for (url in ref_mca_urls) {
+      cat("  Trying:", url, "\n")
+      tryCatch({
+        download.file(url, destfile=ref_mca_cache, mode="wb", quiet=TRUE)
+        if (file.exists(ref_mca_cache) && file.size(ref_mca_cache) > 1000) {
+          cat("  Download successful\n"); break
+        }
+      }, error=function(e) cat("  Failed:", conditionMessage(e), "\n"))
+    }
+  }
+  if (!file.exists(ref_mca_cache) || file.size(ref_mca_cache) < 1000) {
+    cat("  WARNING: ref_MCA unavailable, skipping MCA correlation.\n")
+    return(invisible(NULL))
+  }
+  e <- new.env(); load(ref_mca_cache, envir=e)
+  # Handle both ref_MCA and MouseAtlas object names
+  ref <- if (!is.null(e$ref_MCA)) e$ref_MCA else
+         if (!is.null(e$MouseAtlas)) e$MouseAtlas else
+         get(ls(e)[1], envir=e)
+  if (!is.matrix(ref) && !is.data.frame(ref)) ref <- as.matrix(ref)
+  cat("  ref_MCA loaded:", nrow(ref), "genes x", ncol(ref), "cell types\n")
+
+  # Build per-cluster mean VST profiles using gene symbols
+  your_syms   <- to_sym_fn(rownames(expr_mat))
+  sym_mat     <- expr_mat
+  rownames(sym_mat) <- your_syms
+  sym_mat     <- sym_mat[!duplicated(rownames(sym_mat)), ]
+
+  common_genes <- intersect(rownames(sym_mat), rownames(ref))
+  cat("  Common genes for MCA correlation:", length(common_genes), "\n")
+  if (length(common_genes) < 50) {
+    cat("  WARNING: too few common genes, skipping MCA correlation.\n")
+    return(invisible(NULL))
+  }
+
+  sym_sub <- sym_mat[common_genes, , drop=FALSE]
+  ref_sub <- ref[common_genes, , drop=FALSE]
+
+  wb_mca <- createWorkbook()
+
+  # Summary: top 5 per cluster
+  sum_rows <- list()
+
+  for (cl in as.character(cluster_levels_input)) {
+    cl_cells  <- names(cluster_vec_input)[cluster_vec_input == cl]
+    if (length(cl_cells) == 0) next
+    cl_mean   <- rowMeans(sym_sub[, cl_cells, drop=FALSE])
+
+    # Pearson correlation against all MCA cell types
+    corrs <- cor(cl_mean, ref_sub, method="pearson")[1, ]
+    corrs_sorted <- sort(corrs, decreasing=TRUE)
+
+    cl_df <- data.frame(
+      rank      = seq_along(corrs_sorted),
+      cell_type = names(corrs_sorted),
+      pearson_r = round(corrs_sorted, 4),
+      stringsAsFactors=FALSE
+    )
+
+    sheet_nm <- paste0("Cluster_", cl)
+    addWorksheet(wb_mca, sheet_nm)
+    writeData(wb_mca, sheet_nm, cl_df)
+    addStyle(wb_mca, sheet_nm,
+      style=createStyle(textDecoration="bold", fgFill="#DDEBF7"),
+      rows=1, cols=1:3, gridExpand=TRUE)
+    addStyle(wb_mca, sheet_nm,
+      style=createStyle(fgFill="#BDD7EE"),
+      rows=2:6, cols=1:3, gridExpand=TRUE)
+    setColWidths(wb_mca, sheet_nm, cols=1:3, widths=c(8,40,12))
+
+    sum_rows[[cl]] <- data.frame(
+      cluster=cl, rank=1:5,
+      cell_type=names(corrs_sorted)[1:5],
+      pearson_r=round(corrs_sorted[1:5], 4),
+      stringsAsFactors=FALSE)
+  }
+
+  sum_df <- do.call(rbind, sum_rows)
+  addWorksheet(wb_mca, "Summary_top5")
+  writeData(wb_mca, "Summary_top5", sum_df)
+  addStyle(wb_mca, "Summary_top5",
+    style=createStyle(textDecoration="bold", fgFill="#DDEBF7"),
+    rows=1, cols=1:4, gridExpand=TRUE)
+  setColWidths(wb_mca, "Summary_top5", cols=1:4, widths=c(12,8,40,12))
+
+  # Move Summary to first tab
+  worksheetOrder(wb_mca) <- c(
+    which(names(wb_mca) == "Summary_top5"),
+    which(names(wb_mca) != "Summary_top5")
+  )
+
+  saveWorkbook(wb_mca, out_path, overwrite=TRUE)
+  cat("  Saved:", out_path, "\n")
+}
+
 # -- Shared settings -----------------------------------------------------------
 strains <- c("NOD", "B6G7", "B6MHCIIGFP", "NODPDL1")
 
@@ -540,9 +650,21 @@ for (strain in strains) {
       sprintf("(%.1f%% variance)\n", s_cum_all[s_n_pcs]*100))
   s_pcs_all    <- s_pca_all$x[, 1:s_n_pcs, drop=FALSE]
 
-  cat("  Running Leiden clustering (resolution=", LEIDEN_RESOLUTION, ")...\n",
-      sep="")
-  s_leiden     <- run_leiden(s_pcs_all)
+  # Scale Leiden parameters for per-strain cell counts
+  # Target: ~3-5 clusters per strain
+  # NOTE: with small cell counts, higher resolution is needed to overcome
+  # sparse kNN graphs — counterintuitively, low res collapses everything to 1
+  n_cells_s    <- ncol(expr)
+  s_neighbors  <- max(8, floor(n_cells_s / 5))
+  s_resolution <- ifelse(n_cells_s < 50,  1.2,
+                  ifelse(n_cells_s < 80,  1.5,
+                  ifelse(n_cells_s < 120, 1.8, LEIDEN_RESOLUTION)))
+  cat("  Cells:", n_cells_s, "| Leiden resolution:", s_resolution,
+      "| n_neighbors:", s_neighbors, "\n")
+
+  cat("  Running Leiden clustering...\n")
+  s_leiden     <- run_leiden(s_pcs_all, resolution=s_resolution,
+                              n_neighbors=s_neighbors)
   s_umap_df$cluster <- as.character(s_leiden)
   s_n_clust    <- length(unique(s_umap_df$cluster))
   cat("  Clusters found:", s_n_clust, "\n")
@@ -917,6 +1039,56 @@ p_comb_strain <- ggplot(umap_comb_df,
 comb2_path <- file.path(combined_out, "umap_all372_by_strain_population.pdf")
 ggsave(comb2_path, p_comb_strain, width=8, height=6)
 cat("Saved:", comb2_path, "\n")
+
+# -- 4-panel UMAP: each strain on comprehensive coordinates -------------------
+cat("Generating per-strain panels on comprehensive UMAP coordinates...\n")
+
+strain_panel_plots <- lapply(strains, function(st) {
+  # Cells belonging to this strain
+  st_cells    <- umap_comb_df$cell_id[umap_comb_df$strain == st]
+  df_fg       <- umap_comb_df %>% filter(cell_id %in% st_cells)
+  df_bg       <- umap_comb_df %>% filter(!cell_id %in% st_cells)
+
+  ggplot() +
+    # Background: all other cells in light grey
+    geom_point(data=df_bg, aes(x=UMAP1, y=UMAP2),
+               color="grey88", size=1.0, alpha=0.5) +
+    # Foreground: this strain colored by comprehensive cluster
+    geom_point(data=df_fg, aes(x=UMAP1, y=UMAP2, color=cluster),
+               size=1.8, alpha=0.9) +
+    scale_color_manual(values=cluster_pal_comb) +
+    labs(
+      title  = paste0(st, " (n=", nrow(df_fg), ")"),
+      x      = "UMAP1", y = "UMAP2",
+      color  = "Cluster"
+    ) +
+    coord_fixed() +
+    theme_bw(base_size=11) +
+    theme(
+      plot.title       = element_text(face="bold", size=11),
+      panel.grid.minor = element_blank(),
+      legend.position  = "right",
+      legend.text      = element_text(size=8)
+    )
+})
+
+# Stack 4 panels vertically
+strain_panels_combined <- wrap_plots(strain_panel_plots, ncol=1) +
+  plot_annotation(
+    title    = "Per-strain cells on comprehensive UMAP",
+    subtitle = paste0("Comprehensive Leiden clusters (resolution=",
+                      LEIDEN_RESOLUTION, ") | grey = other strains"),
+    theme    = theme(
+      plot.title    = element_text(face="bold", size=13),
+      plot.subtitle = element_text(size=9, color="grey40")
+    )
+  )
+
+strain_panels_path <- file.path(combined_out,
+                                 "umap_per_strain_on_comprehensive.pdf")
+ggsave(strain_panels_path, strain_panels_combined,
+       width=7, height=6 * length(strains))
+cat("Saved:", strain_panels_path, "\n")
 
 cat("\nCombined UMAPs complete.\n")
 
@@ -1389,6 +1561,222 @@ cellid_comb_path <- file.path(combined_out, "cell_identity_combined_clusters.xls
 saveWorkbook(wb_cellid_comb, cellid_comb_path, overwrite=TRUE)
 cat("  Saved:", cellid_comb_path, "\n")
 
+# ==============================================================================
+# Mouse Cell Atlas expression profile correlation (clustifyrdata::ref_MCA)
+# ==============================================================================
+cat("\nRunning Mouse Cell Atlas expression profile correlation (combined)...\n")
+run_mca_correlation(
+  expr_mat         = combined_expr,
+  cluster_vec_input = cluster_vec,
+  cluster_levels_input = cluster_levels,
+  to_sym_fn        = to_sym,
+  out_path         = file.path(combined_out,
+                               "MCA_celltype_correlation_combined_clusters.xlsx"),
+  label            = "combined"
+)
+
+# ==============================================================================
+# VAF / VRC correlation: compare clusters to Clarke et al. 2025 (GSE292898)
+# ==============================================================================
+cat("\nRunning VAF/VRC correlation analysis (Clarke et al. 2025)...\n")
+
+vaf_counts_f <- file.path(base_dir,
+  "reference/GSE292898_teyton_don_2025_processed_mouse_raw_counts_matrix.csv.gz")
+
+if (!file.exists(vaf_counts_f)) {
+  cat("  WARNING: VAF reference file not found at:\n  ", vaf_counts_f, "\n")
+  cat("  Download from GEO GSE292898 and place in reference/ to enable this analysis.\n")
+} else {
+  cat("  Loading Clarke et al. mouse count matrix...\n")
+
+  # -- Load and normalize reference counts -------------------------------------
+  vaf_raw <- read.csv(gzfile(vaf_counts_f), row.names=1, check.names=FALSE)
+  # Columns: gene_id, gene_name, then cell IDs
+  vaf_gene_id   <- vaf_raw[["gene_id"]]
+  vaf_gene_name <- vaf_raw[["gene_name"]]
+  vaf_counts_mat <- as.matrix(vaf_raw[, !colnames(vaf_raw) %in% c("gene_id","gene_name")])
+  rownames(vaf_counts_mat) <- vaf_gene_name
+  storage.mode(vaf_counts_mat) <- "numeric"
+  cat("  Reference matrix:", nrow(vaf_counts_mat), "genes x",
+      ncol(vaf_counts_mat), "cells\n")
+
+  # Subset to CD45neg cells (plates B-H) per README — these contain VAF + VRC
+  cd45neg_mask <- !grepl("^A[0-9]", colnames(vaf_counts_mat))
+  vaf_neg_mat  <- vaf_counts_mat[, cd45neg_mask, drop=FALSE]
+  cat("  CD45neg cells (B-H plates):", ncol(vaf_neg_mat), "\n")
+
+  # Log1p-CPM normalization
+  lib_sizes_vaf  <- colSums(vaf_neg_mat)
+  cpm_vaf        <- sweep(vaf_neg_mat, 2, lib_sizes_vaf, "/") * 1e6
+  logcpm_vaf     <- log1p(cpm_vaf)
+
+  # -- Recluster CD45neg reference cells to identify VAF vs VRC ---------------
+  # Use PCA on top variable genes then k-means k=2 (paper shows 2 clusters)
+  cat("  Clustering reference CD45neg cells to assign VAF/VRC labels...\n")
+  gene_var_vaf  <- apply(logcpm_vaf, 1, var)
+  top_vaf_genes <- names(sort(gene_var_vaf, decreasing=TRUE))[
+                     1:min(500, nrow(logcpm_vaf))]
+  pca_vaf       <- prcomp(t(logcpm_vaf[top_vaf_genes, ]), center=TRUE,
+                           scale.=FALSE)
+  set.seed(UMAP_SEED)
+  km_vaf        <- kmeans(pca_vaf$x[, 1:min(10, ncol(pca_vaf$x))],
+                           centers=2, nstart=25)
+  cluster_vaf   <- km_vaf$cluster
+
+  # Assign VAF vs VRC using known marker genes from paper (Figure 3)
+  # VAF markers: Col1a1, Col1a2, Timp3, Pecam1(low), Spp1
+  # VRC markers: Pecam1, Eng, Cdh5, Kdr (endothelial)
+  vaf_markers <- intersect(c("Col1a1","Col1a2","Timp3","Spp1","Thy1",
+                               "Pdpn","S100a4","Fn1"), rownames(logcpm_vaf))
+  vrc_markers <- intersect(c("Pecam1","Eng","Cdh5","Kdr","Tie1","Vwf",
+                               "Cdh5","Esam"), rownames(logcpm_vaf))
+
+  score_markers <- function(mat, genes) {
+    g <- intersect(genes, rownames(mat))
+    if (length(g) == 0) return(rep(0, ncol(mat)))
+    colMeans(mat[g, , drop=FALSE])
+  }
+
+  c1_cells <- colnames(logcpm_vaf)[cluster_vaf == 1]
+  c2_cells <- colnames(logcpm_vaf)[cluster_vaf == 2]
+
+  c1_vaf_score <- mean(score_markers(logcpm_vaf[, c1_cells, drop=FALSE], vaf_markers))
+  c2_vaf_score <- mean(score_markers(logcpm_vaf[, c2_cells, drop=FALSE], vaf_markers))
+  c1_vrc_score <- mean(score_markers(logcpm_vaf[, c1_cells, drop=FALSE], vrc_markers))
+  c2_vrc_score <- mean(score_markers(logcpm_vaf[, c2_cells, drop=FALSE], vrc_markers))
+
+  # Cluster with higher VAF score = VAF, other = VRC
+  if (c1_vaf_score > c2_vaf_score) {
+    vaf_cells <- c1_cells; vrc_cells <- c2_cells
+  } else {
+    vaf_cells <- c2_cells; vrc_cells <- c1_cells
+  }
+  cat("  VAF cells identified:", length(vaf_cells), "\n")
+  cat("  VRC cells identified:", length(vrc_cells), "\n")
+  cat("  VAF score check - VAF cluster:", round(max(c1_vaf_score, c2_vaf_score), 3),
+      "VRC cluster:", round(min(c1_vaf_score, c2_vaf_score), 3), "\n")
+  cat("  VRC score check - VRC cluster:", round(max(c1_vrc_score, c2_vrc_score), 3),
+      "VAF cluster:", round(min(c1_vrc_score, c2_vrc_score), 3), "\n")
+
+  # -- Mean expression profiles per reference population ----------------------
+  mean_vaf_ref <- rowMeans(logcpm_vaf[, vaf_cells, drop=FALSE])
+  mean_vrc_ref <- rowMeans(logcpm_vaf[, vrc_cells, drop=FALSE])
+
+  # Also include CD45pos as a third reference (plate A)
+  cd45pos_mask <- grepl("^A[0-9]", colnames(vaf_counts_mat))
+  vaf_pos_mat  <- vaf_counts_mat[, cd45pos_mask, drop=FALSE]
+  lib_pos      <- colSums(vaf_pos_mat)
+  logcpm_pos   <- log1p(sweep(vaf_pos_mat, 2, lib_pos, "/") * 1e6)
+  mean_cd45pos_ref <- rowMeans(logcpm_pos)
+
+  ref_profiles <- list(
+    VAF    = mean_vaf_ref,
+    VRC    = mean_vrc_ref,
+    CD45pos = mean_cd45pos_ref
+  )
+
+  # -- Compute correlations for each of your Leiden clusters ------------------
+  # Use combined_expr (VST) mean profiles per cluster
+  cat("  Computing correlations against combined Leiden clusters...\n")
+
+  # Find common genes between reference (gene symbols) and your data
+  # Your data uses Ensembl IDs as rownames — map to symbols
+  your_symbols <- to_sym(rownames(combined_expr))
+  common_genes_vaf <- intersect(your_symbols,
+                                 names(mean_vaf_ref)[mean_vaf_ref > 0])
+  cat("  Common genes for correlation:", length(common_genes_vaf), "\n")
+
+  # Build your cluster mean profiles on common genes
+  your_idx <- which(your_symbols %in% common_genes_vaf)
+  your_syms_sub <- your_symbols[your_idx]
+
+  corr_results <- list()
+  for (cl_label in as.character(cluster_levels)) {
+    cl_cells_your <- names(cluster_vec)[cluster_vec == cl_label]
+    if (length(cl_cells_your) == 0) next
+
+    your_mean <- rowMeans(combined_expr[your_idx, cl_cells_your, drop=FALSE])
+    names(your_mean) <- your_syms_sub
+
+    cl_corrs <- data.frame(
+      reference_population = character(),
+      pearson_r            = numeric(),
+      spearman_rho         = numeric(),
+      n_genes              = integer(),
+      stringsAsFactors     = FALSE
+    )
+
+    for (ref_name in names(ref_profiles)) {
+      ref_vec  <- ref_profiles[[ref_name]]
+      common   <- intersect(names(your_mean), names(ref_vec))
+      if (length(common) < 50) {
+        cat("    Cluster", cl_label, "vs", ref_name, "- too few common genes:",
+            length(common), "\n")
+        next
+      }
+      y <- your_mean[common]
+      r <- ref_vec[common]
+      pearson_r   <- cor(y, r, method="pearson")
+      spearman_rho <- cor(y, r, method="spearman")
+      cl_corrs <- rbind(cl_corrs, data.frame(
+        reference_population = ref_name,
+        pearson_r            = round(pearson_r,   4),
+        spearman_rho         = round(spearman_rho, 4),
+        n_genes              = length(common),
+        stringsAsFactors     = FALSE
+      ))
+    }
+    corr_results[[cl_label]] <- cl_corrs
+  }
+
+  # -- Build Excel workbook ---------------------------------------------------
+  wb_vaf <- createWorkbook()
+
+  # Summary sheet
+  summary_vaf <- do.call(rbind, lapply(names(corr_results), function(cl) {
+    df <- corr_results[[cl]]
+    if (nrow(df) == 0) return(NULL)
+    best_row <- df[which.max(df$pearson_r), ]
+    data.frame(
+      cluster              = cl,
+      best_match           = best_row$reference_population,
+      best_pearson_r       = best_row$pearson_r,
+      best_spearman_rho    = best_row$spearman_rho,
+      stringsAsFactors     = FALSE
+    )
+  }))
+  addWorksheet(wb_vaf, "Summary")
+  writeData(wb_vaf, "Summary", summary_vaf)
+  addStyle(wb_vaf, "Summary",
+    style=createStyle(textDecoration="bold", fgFill="#E2EFDA"),
+    rows=1, cols=1:4, gridExpand=TRUE)
+  setColWidths(wb_vaf, "Summary", cols=1:4, widths=c(10,18,16,16))
+
+  # One sheet per cluster
+  for (cl_label in names(corr_results)) {
+    df <- corr_results[[cl_label]]
+    if (nrow(df) == 0) next
+    sheet_nm <- paste0("Cluster_", cl_label)
+    addWorksheet(wb_vaf, sheet_nm)
+    writeData(wb_vaf, sheet_nm, df)
+    addStyle(wb_vaf, sheet_nm,
+      style=createStyle(textDecoration="bold", fgFill="#E2EFDA"),
+      rows=1, cols=1:4, gridExpand=TRUE)
+    setColWidths(wb_vaf, sheet_nm, cols=1:4, widths=c(22,12,14,10))
+
+    # Highlight best match row in green
+    best_idx <- which.max(df$pearson_r) + 1  # +1 for header row
+    addStyle(wb_vaf, sheet_nm,
+      style=createStyle(fgFill="#C6EFCE"),
+      rows=best_idx, cols=1:4, gridExpand=TRUE)
+  }
+
+  vaf_corr_path <- file.path(combined_out,
+                              "VAF_VRC_correlation_combined_clusters.xlsx")
+  saveWorkbook(wb_vaf, vaf_corr_path, overwrite=TRUE)
+  cat("  Saved:", vaf_corr_path, "\n")
+}
+
 # -- Score per-strain clusters ------------------------------------------------
 cat("  Scoring per-strain clusters...\n")
 
@@ -1414,22 +1802,38 @@ for (strain in strains) {
     cl_label   <- as.character(cl)
     cl_cells   <- names(s_cluster_vec)[s_cluster_vec == cl_label]
     rest_cells <- names(s_cluster_vec)[s_cluster_vec != cl_label]
-    if (length(cl_cells) < 2 || length(rest_cells) < 2) next
 
-    mean_cl   <- rowMeans(s_expr[, cl_cells,   drop=FALSE])
-    mean_rest <- rowMeans(s_expr[, rest_cells, drop=FALSE])
-    log2fc    <- mean_cl - mean_rest
-    candidates <- names(log2fc)[log2fc >= MIN_LOG2FC]
-    if (length(candidates) < 2) next
+    # Attempt Wilcoxon one-vs-rest if enough cells in both groups
+    syms_s <- character(0)
+    if (length(cl_cells) >= 2 && length(rest_cells) >= 2) {
+      mean_cl   <- rowMeans(s_expr[, cl_cells,   drop=FALSE])
+      mean_rest <- rowMeans(s_expr[, rest_cells, drop=FALSE])
+      log2fc    <- mean_cl - mean_rest
+      candidates <- names(log2fc)[log2fc >= MIN_LOG2FC]
 
-    pvals_s <- sapply(candidates, function(g) {
-      wilcox.test(s_expr[g, cl_cells], s_expr[g, rest_cells],
-                  alternative="greater", exact=FALSE)$p.value
-    })
-    padj_s  <- p.adjust(pvals_s, method="BH")
-    sig_s   <- candidates[padj_s < MAX_PADJ]
-    syms_s  <- to_sym(sig_s)
-    syms_s  <- syms_s[syms_s != ""]
+      if (length(candidates) >= 2) {
+        pvals_s <- sapply(candidates, function(g) {
+          wilcox.test(s_expr[g, cl_cells], s_expr[g, rest_cells],
+                      alternative="greater", exact=FALSE)$p.value
+        })
+        padj_s <- p.adjust(pvals_s, method="BH")
+        sig_s  <- candidates[padj_s < MAX_PADJ]
+        syms_s <- unique(to_sym(sig_s))
+        syms_s <- syms_s[syms_s != ""]
+      }
+    }
+
+    # Fallback: if too few Wilcoxon markers use top 50 expressed genes
+    if (length(syms_s) < 10) {
+      cat("    Cluster", cl_label, "- insufficient Wilcoxon markers (",
+          length(syms_s), "), using top expressed genes\n")
+      mean_cl_all <- if (length(cl_cells) == 1) s_expr[, cl_cells]
+                     else rowMeans(s_expr[, cl_cells, drop=FALSE])
+      top_ens <- names(sort(mean_cl_all, decreasing=TRUE))[
+                   1:min(50, length(mean_cl_all))]
+      syms_s  <- unique(to_sym(top_ens))
+      syms_s  <- syms_s[syms_s != ""]
+    }
 
     sc_s   <- score_cluster(syms_s, cell_db, universe_size)
     top_ct <- if (nrow(sc_s) > 0) sc_s$cell_type[1] else "no match"
@@ -1553,6 +1957,610 @@ cat("   - barplots_cluster_composition.pdf  (all 4 charts, 2x2)\n")
 cat("   - cluster_marker_genes.xlsx\n")
 cat("   - heatmap_cluster_markers.pdf\n")
 cat("==============================================================\n")
+
+# ==============================================================================
+# CombinedwithVAFPaperPlots: merge your cells with Clarke et al. 2025 mouse data
+# ==============================================================================
+cat("\n==============================================================\n")
+cat("Building CombinedwithVAFPaperPlots analysis...\n")
+cat("==============================================================\n")
+
+vaf_counts_f2 <- file.path(base_dir,
+  "reference/GSE292898_teyton_don_2025_processed_mouse_raw_counts_matrix.csv.gz")
+
+if (!file.exists(vaf_counts_f2)) {
+  cat("WARNING: Clarke et al. count matrix not found. Skipping merged analysis.\n")
+  cat("Place file at:", vaf_counts_f2, "\n")
+} else {
+
+  vaf_out_dir <- file.path(dge_dir, "CombinedwithVAFPaperPlots")
+  dir.create(vaf_out_dir, showWarnings=FALSE, recursive=TRUE)
+
+  # -- Load Clarke counts ------------------------------------------------------
+  cat("Loading Clarke et al. mouse count matrix...\n")
+  vaf_raw2      <- read.csv(gzfile(vaf_counts_f2), row.names=1, check.names=FALSE)
+  vaf_gene_sym2 <- vaf_raw2[["gene_name"]]
+  vaf_cnt_mat2  <- as.matrix(vaf_raw2[, !colnames(vaf_raw2) %in%
+                                        c("gene_id","gene_name")])
+  rownames(vaf_cnt_mat2) <- vaf_gene_sym2
+  storage.mode(vaf_cnt_mat2) <- "numeric"
+  cat("Clarke matrix:", nrow(vaf_cnt_mat2), "genes x",
+      ncol(vaf_cnt_mat2), "cells\n")
+
+  # -- Map Clarke gene symbols to Ensembl IDs ----------------------------------
+  # Your pipeline uses Ensembl IDs as rownames; Clarke uses symbols
+  # Build reverse map: symbol -> first Ensembl ID
+  ens_to_sym_vec <- to_sym(rownames(combined_expr))
+  sym_to_ens_rev <- tapply(rownames(combined_expr), ens_to_sym_vec, `[`, 1)
+
+  clarke_syms_in_yours <- intersect(rownames(vaf_cnt_mat2),
+                                     names(sym_to_ens_rev))
+  cat("Clarke genes mappable to your Ensembl IDs:", length(clarke_syms_in_yours),
+      "\n")
+
+  # Subset Clarke to mappable genes, reindex by Ensembl
+  vaf_cnt_sub <- vaf_cnt_mat2[clarke_syms_in_yours, , drop=FALSE]
+  ens_ids_for_clarke <- sym_to_ens_rev[clarke_syms_in_yours]
+  rownames(vaf_cnt_sub) <- ens_ids_for_clarke
+
+  # -- MHCII filter on Clarke cells --------------------------------------------
+  cat("Applying MHCII filter to Clarke cells...\n")
+  mhcii_ens_clarke <- sym_to_ens_rev[MHCII_GENES]
+  mhcii_ens_clarke <- mhcii_ens_clarke[!is.na(mhcii_ens_clarke) &
+                                         mhcii_ens_clarke %in% rownames(vaf_cnt_sub)]
+  if (length(mhcii_ens_clarke) >= 2) {
+    lib_c       <- colSums(vaf_cnt_sub)
+    cpm_c       <- sweep(vaf_cnt_sub, 2, pmax(lib_c, 1), "/") * 1e6
+    logcpm_c    <- log1p(cpm_c)
+    passes_c    <- colSums(logcpm_c[mhcii_ens_clarke, , drop=FALSE] >=
+                             log1p(5)) == 2
+    vaf_cnt_sub <- vaf_cnt_sub[, passes_c, drop=FALSE]
+    cat("Clarke cells passing MHCII filter:", ncol(vaf_cnt_sub), "/",
+        sum(!is.na(passes_c)), "\n")
+  } else {
+    cat("WARNING: MHCII genes not found in Clarke data, skipping filter\n")
+  }
+
+  # -- DESeq2 VST on Clarke cells ----------------------------------------------
+  cat("Running DESeq2 VST on Clarke cells...\n")
+
+  # Assign population labels based on cell ID prefix
+  clarke_cell_ids <- colnames(vaf_cnt_sub)
+  clarke_cd45pos  <- grepl("^A[0-9]", clarke_cell_ids)
+
+  # For CD45neg: reuse k-means VAF/VRC assignment from earlier
+  # Recompute on the filtered subset
+  cd45neg_ids <- clarke_cell_ids[!clarke_cd45pos]
+  if (length(cd45neg_ids) >= 4) {
+    logcpm_neg_sub <- log1p(sweep(
+      vaf_cnt_sub[, cd45neg_ids, drop=FALSE], 2,
+      pmax(colSums(vaf_cnt_sub[, cd45neg_ids, drop=FALSE]), 1), "/") * 1e6)
+    gv_neg   <- apply(logcpm_neg_sub, 1, var)
+    top_neg  <- names(sort(gv_neg, decreasing=TRUE))[1:min(500, length(gv_neg))]
+    pca_neg  <- prcomp(t(logcpm_neg_sub[top_neg, ]), center=TRUE, scale.=FALSE)
+    set.seed(UMAP_SEED)
+    km_neg   <- kmeans(pca_neg$x[, 1:min(10, ncol(pca_neg$x))],
+                        centers=2, nstart=25)
+
+    vaf_m <- intersect(c("Col1a1","Col1a2","Timp3","Spp1","Thy1","Pdpn"),
+                        rownames(logcpm_neg_sub))
+    vrc_m <- intersect(c("Pecam1","Eng","Cdh5","Kdr","Tie1","Vwf"),
+                        rownames(logcpm_neg_sub))
+    sc1   <- mean(colMeans(logcpm_neg_sub[vaf_m, km_neg$cluster==1, drop=FALSE]))
+    sc2   <- mean(colMeans(logcpm_neg_sub[vaf_m, km_neg$cluster==2, drop=FALSE]))
+    vaf_ids_c <- cd45neg_ids[km_neg$cluster == ifelse(sc1 > sc2, 1, 2)]
+    vrc_ids_c <- cd45neg_ids[km_neg$cluster == ifelse(sc1 > sc2, 2, 1)]
+    cat("Clarke VAF cells:", length(vaf_ids_c),
+        "| VRC cells:", length(vrc_ids_c), "\n")
+  } else {
+    vaf_ids_c <- cd45neg_ids
+    vrc_ids_c <- character(0)
+  }
+
+  # Build condition vector for Clarke cells
+  clarke_condition <- ifelse(clarke_cd45pos, "CD45pos_MHCIIpos",
+                      ifelse(clarke_cell_ids %in% vaf_ids_c, "VAF", "VRC"))
+
+  # Build a simple colData and run VST
+  clarke_col_data <- data.frame(
+    condition = factor(clarke_condition),
+    row.names = clarke_cell_ids
+  )
+  # Round counts, filter low-count genes
+  vaf_cnt_round <- round(vaf_cnt_sub)
+  keep_c        <- rowSums(vaf_cnt_round) >= 10
+  vaf_cnt_round <- vaf_cnt_round[keep_c, , drop=FALSE]
+
+  dds_clarke <- DESeqDataSetFromMatrix(
+    countData = vaf_cnt_round,
+    colData   = clarke_col_data,
+    design    = ~ condition
+  )
+  dds_clarke <- estimateSizeFactors(dds_clarke, type="poscounts")
+  vsd_clarke <- varianceStabilizingTransformation(dds_clarke, blind=TRUE)
+  expr_clarke <- assay(vsd_clarke)
+  cat("Clarke VST complete:", nrow(expr_clarke), "genes x",
+      ncol(expr_clarke), "cells\n")
+
+  # -- Build metadata for Clarke cells -----------------------------------------
+  meta_clarke <- data.frame(
+    cell_id   = clarke_cell_ids,
+    strain    = "Clarke2025",
+    condition = clarke_condition,
+    strain_condition = paste0("Clarke2025 ",
+      ifelse(clarke_cd45pos, "CD45pos",
+      ifelse(clarke_cell_ids %in% vaf_ids_c, "VAF", "VRC"))),
+    row.names = clarke_cell_ids,
+    stringsAsFactors = FALSE
+  )
+
+  # -- Merge your VST with Clarke VST ------------------------------------------
+  common_ens <- intersect(rownames(combined_expr), rownames(expr_clarke))
+  cat("Common Ensembl IDs for merged matrix:", length(common_ens), "\n")
+
+  merged_expr_raw <- cbind(combined_expr[common_ens, ],
+                            expr_clarke[common_ens, ])
+  cat("Merged matrix (pre-correction):", nrow(merged_expr_raw), "genes x",
+      ncol(merged_expr_raw), "cells\n")
+
+  # -- Build merged metadata BEFORE batch correction (needed as covariate) ---
+  your_meta_sub <- combined_meta[, c("cell_id","strain","condition",
+                                      "strain_condition")]
+  meta_merged <- rbind(your_meta_sub, meta_clarke[, colnames(your_meta_sub)])
+  rownames(meta_merged) <- meta_merged$cell_id
+  cat("Merged metadata:", nrow(meta_merged), "rows\n")
+
+  # -- Batch correction: limma::removeBatchEffect ----------------------------
+  # Corrects for the between-dataset expression scale difference while
+  # preserving biological variation. Applied only for this merged analysis;
+  # all other outputs use the uncorrected per-plate VST.
+  if (!requireNamespace("limma", quietly=TRUE)) {
+    cat("  Installing limma...\n")
+    if (!requireNamespace("BiocManager", quietly=TRUE))
+      install.packages("BiocManager", repos="https://cloud.r-project.org", quiet=TRUE)
+    BiocManager::install("limma", ask=FALSE, update=FALSE, quiet=TRUE)
+  }
+  suppressPackageStartupMessages(library(limma))
+
+  # Batch vector: "yours" for your 4 strains, "clarke" for Clarke2025
+  all_cells_merged <- colnames(merged_expr_raw)
+  batch_vec        <- ifelse(all_cells_merged %in% colnames(combined_expr),
+                              "yours", "clarke")
+  cat("  Batch composition — yours:", sum(batch_vec=="yours"),
+      "| clarke:", sum(batch_vec=="clarke"), "\n")
+
+  # Preserve condition structure as a covariate so biological signal
+  # is not removed along with the batch effect
+  meta_merged_ordered <- meta_merged[all_cells_merged, ]
+  condition_covar     <- model.matrix(~ condition,
+                           data=data.frame(
+                             condition=factor(meta_merged_ordered$condition)))
+
+  merged_expr <- removeBatchEffect(merged_expr_raw,
+                                    batch     = batch_vec,
+                                    design    = condition_covar)
+  cat("  Batch correction applied (limma::removeBatchEffect)\n")
+  cat("Merged matrix (post-correction):", nrow(merged_expr), "genes x",
+      ncol(merged_expr), "cells\n")
+
+  # (meta_merged already built above before batch correction)
+
+  # -- Color palettes for merged analysis --------------------------------------
+  # Clarke2025 gets grey/brown tones to distinguish from your strains
+  strain_colors_merged <- c(
+    NOD         = "#2166AC",
+    B6G7        = "#D6604D",
+    B6MHCIIGFP  = "#4DAC26",
+    NODPDL1     = "#8B44AC",
+    Clarke2025  = "#8B6914"
+  )
+
+  sc_palette_merged <- c(
+    sc_palette_v2,
+    "Clarke2025 CD45pos" = "#C49A2A",
+    "Clarke2025 VAF"     = "#6B4F10",
+    "Clarke2025 VRC"     = "#D4A843"
+  )
+
+  # -- HVG selection and UMAP on merged matrix ---------------------------------
+  cat("Running HVG selection on merged matrix...\n")
+  gv_merged  <- apply(merged_expr, 1, var)
+  hvg_merged <- names(sort(gv_merged, decreasing=TRUE))[
+                  1:min(N_HVG, length(gv_merged))]
+  expr_hvg_m <- merged_expr[hvg_merged, ]
+
+  cat("Running PCA + UMAP (merged)...\n")
+  umap_merged <- run_umap(expr_hvg_m)
+
+  umap_m_df <- data.frame(umap_merged,
+                            cell_id = rownames(umap_merged),
+                            stringsAsFactors=FALSE) %>%
+    left_join(meta_merged[, c("cell_id","strain","condition","strain_condition")],
+              by="cell_id")
+
+  # All-gene PCA for Leiden on merged
+  cat("Running all-gene PCA for Leiden clustering (merged)...\n")
+  pca_m_all  <- prcomp(t(merged_expr), center=TRUE, scale.=FALSE)
+  var_m_all  <- pca_m_all$sdev^2 / sum(pca_m_all$sdev^2)
+  cum_m_all  <- cumsum(var_m_all)
+  n_pcs_m    <- max(2, which(cum_m_all >= VAR_THRESHOLD)[1])
+  cat("PCs selected (merged all-gene):", n_pcs_m,
+      sprintf("(%.1f%% variance)\n", cum_m_all[n_pcs_m]*100))
+  pcs_m_all  <- pca_m_all$x[, 1:n_pcs_m, drop=FALSE]
+
+  cat("Running Leiden clustering (merged)...\n")
+  leiden_m           <- run_leiden(pcs_m_all)
+  umap_m_df$cluster  <- as.character(leiden_m)
+  n_clust_m          <- length(unique(umap_m_df$cluster))
+  umap_m_df$cluster  <- factor(umap_m_df$cluster,
+                                levels=sort(unique(as.integer(umap_m_df$cluster))))
+  cat("Clusters found:", n_clust_m, "\n")
+
+  cluster_pal_m <- setNames(scales::hue_pal()(n_clust_m),
+                              sort(unique(as.character(umap_m_df$cluster))))
+  cluster_vec_m <- setNames(as.character(umap_m_df$cluster), umap_m_df$cell_id)
+
+  # -- UMAP 1: by Leiden cluster -----------------------------------------------
+  p_m_clust <- ggplot(umap_m_df, aes(x=UMAP1, y=UMAP2, color=cluster)) +
+    geom_point(size=1.5, alpha=0.85) +
+    scale_color_manual(values=cluster_pal_m) +
+    labs(
+      title    = paste0("Your cells + Clarke 2025 — ",
+                        nrow(umap_m_df), " cells by Leiden cluster"),
+      subtitle = paste0("n=", nrow(umap_m_df),
+                        " | UMAP: top ", N_HVG,
+                        " HVGs | Clusters: all-gene PCA | resolution=",
+                        LEIDEN_RESOLUTION, " | ", n_clust_m, " clusters"),
+      color    = "Cluster"
+    ) +
+    theme_bw(base_size=12) +
+    theme(plot.title=element_text(face="bold", size=12),
+          plot.subtitle=element_text(size=8, color="grey40"),
+          panel.grid.minor=element_blank(), aspect.ratio=1)
+
+  ggsave(file.path(vaf_out_dir, "umap_merged_by_cluster.pdf"),
+         p_m_clust, width=7, height=6)
+  cat("Saved: umap_merged_by_cluster.pdf\n")
+
+  # -- UMAP 2: by strain/population --------------------------------------------
+  p_m_strain <- ggplot(umap_m_df,
+                        aes(x=UMAP1, y=UMAP2, fill=strain_condition)) +
+    geom_point(size=1.0, alpha=1.0, stroke=0.2, shape=21,
+               aes(fill=strain_condition), color="grey20") +
+    scale_fill_manual(values=sc_palette_merged,
+                      na.value="grey60") +
+    labs(
+      title    = paste0("Your cells + Clarke 2025 — ",
+                        nrow(umap_m_df), " cells by strain & population"),
+      subtitle = "5 strains x conditions",
+      fill     = "Strain / Population"
+    ) +
+    guides(fill=guide_legend(ncol=2, override.aes=list(size=3, stroke=0.3))) +
+    theme_bw(base_size=12) +
+    theme(plot.title=element_text(face="bold", size=12),
+          plot.subtitle=element_text(size=9, color="grey40"),
+          panel.grid.minor=element_blank(),
+          legend.text=element_text(size=7), aspect.ratio=1)
+
+  ggsave(file.path(vaf_out_dir, "umap_merged_by_strain_population.pdf"),
+         p_m_strain, width=8, height=6)
+  cat("Saved: umap_merged_by_strain_population.pdf\n")
+
+  # -- Per-strain panels on merged UMAP ----------------------------------------
+  all_strains_merged <- c(strains, "Clarke2025")
+  strain_panels_m <- lapply(all_strains_merged, function(st) {
+    st_cells <- umap_m_df$cell_id[umap_m_df$strain == st]
+    df_fg    <- umap_m_df %>% filter(cell_id %in% st_cells)
+    df_bg    <- umap_m_df %>% filter(!cell_id %in% st_cells)
+    ggplot() +
+      geom_point(data=df_bg, aes(x=UMAP1, y=UMAP2),
+                 color="grey88", size=0.9, alpha=0.5) +
+      geom_point(data=df_fg, aes(x=UMAP1, y=UMAP2, color=cluster),
+                 size=1.6, alpha=0.9) +
+      scale_color_manual(values=cluster_pal_m) +
+      labs(title=paste0(st, " (n=", nrow(df_fg), ")"),
+           x="UMAP1", y="UMAP2", color="Cluster") +
+      coord_fixed() +
+      theme_bw(base_size=11) +
+      theme(plot.title=element_text(face="bold", size=11),
+            panel.grid.minor=element_blank(),
+            legend.text=element_text(size=8))
+  })
+  panels_m_combined <- wrap_plots(strain_panels_m, ncol=1) +
+    plot_annotation(
+      title    = "Per-strain cells on merged UMAP (your cells + Clarke 2025)",
+      subtitle = paste0("Merged Leiden clusters | resolution=", LEIDEN_RESOLUTION,
+                        " | grey = other strains"),
+      theme    = theme(plot.title=element_text(face="bold", size=13),
+                       plot.subtitle=element_text(size=9, color="grey40"))
+    )
+  ggsave(file.path(vaf_out_dir, "umap_per_strain_on_merged.pdf"),
+         panels_m_combined,
+         width=7, height=6 * length(all_strains_merged))
+  cat("Saved: umap_per_strain_on_merged.pdf\n")
+
+  # -- Bar charts (cluster composition) ----------------------------------------
+  cat("Generating merged cluster bar charts...\n")
+  umap_m_df$condition_clean  <- clean_label(umap_m_df$condition)
+  umap_m_df$condition_clean  <- ifelse(
+    umap_m_df$strain == "Clarke2025",
+    umap_m_df$strain_condition,
+    umap_m_df$condition_clean)
+
+  make_label_df_m <- function(df, fill_var, type) {
+    df %>%
+      group_by(cluster, .data[[fill_var]]) %>%
+      summarise(n=n(), .groups="drop") %>%
+      group_by(cluster) %>%
+      mutate(total=sum(n), prop=n/total,
+             label_count=ifelse(prop>=MIN_LABEL_PROP, as.character(n), ""),
+             label_prop =ifelse(prop>=MIN_LABEL_PROP,
+                                paste0(round(prop*100), "%"), ""),
+             y_pos=cumsum(if(type=="count") n else prop) -
+                   0.5*(if(type=="count") n else prop)) %>%
+      ungroup()
+  }
+
+  lab_sc_c <- make_label_df_m(umap_m_df, "strain_condition", "count")
+  lab_sc_p <- make_label_df_m(umap_m_df, "strain_condition", "prop")
+  lab_s_c  <- make_label_df_m(umap_m_df, "strain",           "count")
+  lab_s_p  <- make_label_df_m(umap_m_df, "strain",           "prop")
+
+  mk_bar <- function(lab, fill_var, pal, y_var, y_lab, title_str, prop=FALSE) {
+    # Use pre-computed label column based on prop flag
+    lab$bar_label <- if (isTRUE(prop)) lab$label_prop else lab$label_count
+    p <- ggplot(lab, aes(x=cluster, y=.data[[y_var]], fill=.data[[fill_var]])) +
+      geom_bar(stat="identity", position="stack", color="white", linewidth=0.15) +
+      geom_text(aes(y=y_pos, label=bar_label),
+                size=2.5, color="white", fontface="bold") +
+      scale_fill_manual(values=pal, na.value="grey60") +
+      labs(title=title_str, x="Cluster",
+           y=y_lab, fill=sub(" —.*","",title_str)) +
+      theme_bw(base_size=10) +
+      theme(plot.title=element_text(face="bold", size=10),
+            panel.grid.minor=element_blank(),
+            legend.text=element_text(size=7),
+            legend.key.size=unit(0.4,"cm"))
+    if (isTRUE(prop)) p <- p + scale_y_continuous(labels=scales::percent_format())
+    p
+  }
+
+  p_b1 <- mk_bar(lab_sc_c, "strain_condition", sc_palette_merged,
+                  "n",    "Cell count",       "Strain & population — counts")
+  p_b2 <- mk_bar(lab_sc_p, "strain_condition", sc_palette_merged,
+                  "prop", "Proportion",       "Strain & population — proportions",
+                  prop=TRUE)
+  p_b3 <- mk_bar(lab_s_c,  "strain",           strain_colors_merged,
+                  "n",    "Cell count",       "Strain — counts")
+  p_b4 <- mk_bar(lab_s_p,  "strain",           strain_colors_merged,
+                  "prop", "Proportion",       "Strain — proportions", prop=TRUE)
+
+  bar_m <- (p_b1 | p_b2) / (p_b3 | p_b4) +
+    plot_annotation(
+      title    = paste0("Merged cluster composition — ", n_clust_m,
+                        " clusters | n=", nrow(umap_m_df), " cells"),
+      subtitle = paste0("Labels shown for segments >= ", MIN_LABEL_PROP*100,
+                        "% of bar"),
+      theme    = theme(plot.title=element_text(face="bold", size=14),
+                       plot.subtitle=element_text(size=9, color="grey40"))
+    )
+  ggsave(file.path(vaf_out_dir, "barplots_cluster_composition.pdf"),
+         bar_m, width=20, height=14)
+  cat("Saved: barplots_cluster_composition.pdf\n")
+
+  # -- Cluster marker genes (Wilcoxon on merged VST) ---------------------------
+  cat("Running Wilcoxon marker gene analysis on merged clusters...\n")
+  cluster_levels_m <- sort(unique(as.integer(as.character(umap_m_df$cluster))))
+  all_markers_m    <- list()
+  wb_m             <- createWorkbook()
+
+  summary_m <- umap_m_df %>%
+    group_by(cluster, strain, condition_clean) %>%
+    summarise(n_cells=n(), .groups="drop") %>%
+    arrange(as.integer(as.character(cluster)), strain, condition_clean)
+  addWorksheet(wb_m, "Summary"); writeData(wb_m, "Summary", summary_m)
+
+  for (cl in cluster_levels_m) {
+    cl_label   <- as.character(cl)
+    cl_cells   <- names(cluster_vec_m)[cluster_vec_m == cl_label]
+    rest_cells <- names(cluster_vec_m)[cluster_vec_m != cl_label]
+    mean_cl    <- rowMeans(merged_expr[, cl_cells,   drop=FALSE])
+    mean_rest  <- rowMeans(merged_expr[, rest_cells, drop=FALSE])
+    log2fc     <- mean_cl - mean_rest
+    candidates <- names(log2fc)[log2fc >= MIN_LOG2FC]
+    if (length(candidates) < 2) { all_markers_m[[cl_label]] <- data.frame(); next }
+    pv <- sapply(candidates, function(g)
+           wilcox.test(merged_expr[g, cl_cells], merged_expr[g, rest_cells],
+                       alternative="greater", exact=FALSE)$p.value)
+    pa <- p.adjust(pv, method="BH")
+    res_m <- data.frame(
+      ensembl_id=candidates, gene_symbol=to_sym(candidates),
+      mean_VST_cluster=round(mean_cl[candidates],4),
+      mean_VST_rest=round(mean_rest[candidates],4),
+      log2FC=round(log2fc[candidates],4),
+      pval=signif(pv,4), padj=signif(pa,4),
+      stringsAsFactors=FALSE) %>%
+      filter(padj < MAX_PADJ) %>%
+      arrange(desc(log2FC)) %>%
+      distinct(gene_symbol, .keep_all=TRUE) %>%
+      slice_head(n=TOP_EXCEL) %>%
+      mutate(rank=row_number()) %>%
+      select(rank,ensembl_id,gene_symbol,mean_VST_cluster,mean_VST_rest,
+             log2FC,pval,padj)
+    all_markers_m[[cl_label]] <- res_m
+    sn <- paste0("Cluster_", cl_label)
+    addWorksheet(wb_m, sn); writeData(wb_m, sn, res_m)
+    addStyle(wb_m, sn, style=createStyle(textDecoration="bold",fgFill="#D9E1F2"),
+             rows=1, cols=1:8, gridExpand=TRUE)
+    setColWidths(wb_m, sn, cols=1:8, widths=c(6,20,16,16,14,10,12,12))
+  }
+  markers_m_path <- file.path(vaf_out_dir, "cluster_marker_genes.xlsx")
+  saveWorkbook(wb_m, markers_m_path, overwrite=TRUE)
+  cat("Saved: cluster_marker_genes.xlsx\n")
+
+  # -- Heatmap -----------------------------------------------------------------
+  cat("Generating merged cluster marker heatmap...\n")
+  hm_genes_m <- c()
+  for (cl_label in as.character(cluster_levels_m)) {
+    if (!is.null(all_markers_m[[cl_label]]) &&
+        nrow(all_markers_m[[cl_label]]) > 0) {
+      top_g <- all_markers_m[[cl_label]]$gene_symbol[
+                 !all_markers_m[[cl_label]]$gene_symbol %in% hm_genes_m]
+      hm_genes_m <- c(hm_genes_m, head(top_g, TOP_HEATMAP))
+    }
+  }
+  cat("Heatmap genes:", length(hm_genes_m), "\n")
+  sym_to_ens_m  <- setNames(names(sym_map), sym_map)
+  hm_ens_m      <- sym_to_ens_m[hm_genes_m]
+  hm_ens_m      <- hm_ens_m[!is.na(hm_ens_m) & hm_ens_m %in% rownames(merged_expr)]
+  cell_ord_m    <- umap_m_df$cell_id[order(as.integer(
+                     as.character(umap_m_df$cluster)))]
+  expr_hm_m     <- merged_expr[hm_ens_m, cell_ord_m]
+  rownames(expr_hm_m) <- to_sym(rownames(expr_hm_m))
+  expr_z_m      <- t(scale(t(expr_hm_m)))
+  expr_z_m[expr_z_m >  2.5] <-  2.5
+  expr_z_m[expr_z_m < -2.5] <- -2.5
+  clust_anno_m  <- as.character(umap_m_df$cluster[
+                     match(cell_ord_m, umap_m_df$cell_id)])
+  ha_m <- HeatmapAnnotation(
+    Cluster=clust_anno_m,
+    col=list(Cluster=cluster_pal_m),
+    annotation_name_side="left"
+  )
+  col_fun_m <- colorRamp2(c(-2.5,0,2.5), c("#3D0751","#1A1A1A","#F5E642"))
+  ht_m <- Heatmap(
+    expr_z_m, name="Z-score", col=col_fun_m,
+    top_annotation=ha_m,
+    show_column_names=FALSE, show_row_names=TRUE,
+    row_names_gp=gpar(fontsize=7, fontface="italic"),
+    cluster_rows=FALSE, cluster_columns=FALSE,
+    column_title=paste0("Merged cluster marker genes — ",
+                         length(hm_genes_m), " genes x ", ncol(expr_z_m), " cells"),
+    column_title_gp=gpar(fontsize=12, fontface="bold"),
+    use_raster=TRUE, raster_quality=5
+  )
+  hm_path_m <- file.path(vaf_out_dir, "heatmap_cluster_markers.pdf")
+  pdf(hm_path_m, width=18,
+      height=max(8, length(hm_genes_m)*0.18+3))
+  draw(ht_m, heatmap_legend_side="right", annotation_legend_side="bottom")
+  dev.off()
+  cat("Saved: heatmap_cluster_markers.pdf\n")
+
+  # -- Cluster violin plots ----------------------------------------------------
+  cat("Generating merged cluster violin plots...\n")
+  vln_ens_m <- sym_to_ens_m[VIOLIN_GENES]
+  vln_ens_m <- vln_ens_m[!is.na(vln_ens_m) & vln_ens_m %in% rownames(merged_expr)]
+
+  vln_m_df <- as.data.frame(t(merged_expr[vln_ens_m, umap_m_df$cell_id,
+                                            drop=FALSE])) %>%
+    tibble::rownames_to_column("cell_id") %>%
+    left_join(umap_m_df[, c("cell_id","cluster")], by="cell_id") %>%
+    pivot_longer(-c(cell_id,cluster), names_to="ensembl_id", values_to="VST") %>%
+    mutate(gene_symbol=to_sym(ensembl_id),
+           cluster=factor(cluster,
+                           levels=sort(unique(as.integer(
+                             as.character(umap_m_df$cluster))))))
+
+  vln_m_plots <- lapply(seq_along(vln_ens_m), function(i) {
+    ens <- vln_ens_m[i]; sym <- names(vln_ens_m)[i]
+    df_g <- vln_m_df %>% filter(ensembl_id == ens)
+    ggplot(df_g, aes(x=cluster, y=VST, fill=cluster)) +
+      geom_violin(trim=TRUE, scale="width", alpha=0.85, linewidth=0.3) +
+      geom_jitter(width=0.15, size=0.6, alpha=0.35, color="grey20") +
+      scale_fill_manual(values=cluster_pal_m) +
+      labs(title=sym, x="Leiden Cluster", y="VST expression") +
+      theme_bw(base_size=11) +
+      theme(plot.title=element_text(face="bold.italic", size=11),
+            legend.position="none", panel.grid.minor=element_blank())
+  })
+  n_vln_m   <- length(vln_m_plots)
+  vln_m_panel <- wrap_plots(vln_m_plots, ncol=min(3, n_vln_m)) +
+    plot_annotation(
+      title    = "Gene expression across merged Leiden clusters",
+      subtitle = paste0("VST-normalized | n=", nrow(umap_m_df),
+                        " cells (your data + Clarke 2025)"),
+      theme    = theme(plot.title=element_text(face="bold", size=13),
+                       plot.subtitle=element_text(size=9, color="grey40"))
+    )
+  ggsave(file.path(vaf_out_dir, "violin_plots_by_cluster.pdf"),
+         vln_m_panel,
+         width=min(3,n_vln_m)*5, height=ceiling(n_vln_m/3)*5)
+  cat("Saved: violin_plots_by_cluster.pdf\n")
+
+  # -- VAF/VRC correlation on merged clusters ----------------------------------
+  cat("Running VAF/VRC correlation on merged clusters...\n")
+  # Reuse ref_profiles from earlier VAF/VRC block if available
+  if (exists("ref_profiles")) {
+    your_sym_merged   <- to_sym(rownames(merged_expr))
+    common_m_vaf      <- intersect(your_sym_merged, names(ref_profiles[["VAF"]]))
+    your_idx_m        <- which(your_sym_merged %in% common_m_vaf)
+    your_syms_m       <- your_sym_merged[your_idx_m]
+    wb_vaf_m          <- createWorkbook()
+    summary_vaf_m     <- data.frame(cluster=character(), best_match=character(),
+                                     best_pearson_r=numeric(),
+                                     best_spearman_rho=numeric(),
+                                     stringsAsFactors=FALSE)
+    for (cl_label in as.character(cluster_levels_m)) {
+      cl_cells_m <- names(cluster_vec_m)[cluster_vec_m == cl_label]
+      your_mean_m <- rowMeans(merged_expr[your_idx_m, cl_cells_m, drop=FALSE])
+      names(your_mean_m) <- your_syms_m
+      cl_corrs_m <- data.frame(reference_population=character(),
+                                pearson_r=numeric(), spearman_rho=numeric(),
+                                n_genes=integer(), stringsAsFactors=FALSE)
+      for (ref_name in names(ref_profiles)) {
+        ref_v  <- ref_profiles[[ref_name]]
+        common <- intersect(names(your_mean_m), names(ref_v))
+        if (length(common) < 50) next
+        cl_corrs_m <- rbind(cl_corrs_m, data.frame(
+          reference_population=ref_name,
+          pearson_r=round(cor(your_mean_m[common], ref_v[common], method="pearson"),4),
+          spearman_rho=round(cor(your_mean_m[common], ref_v[common], method="spearman"),4),
+          n_genes=length(common), stringsAsFactors=FALSE))
+      }
+      best_m <- cl_corrs_m[which.max(cl_corrs_m$pearson_r), ]
+      summary_vaf_m <- rbind(summary_vaf_m, data.frame(
+        cluster=cl_label, best_match=best_m$reference_population,
+        best_pearson_r=best_m$pearson_r,
+        best_spearman_rho=best_m$spearman_rho, stringsAsFactors=FALSE))
+      sn_m <- paste0("Cluster_", cl_label)
+      addWorksheet(wb_vaf_m, sn_m); writeData(wb_vaf_m, sn_m, cl_corrs_m)
+      addStyle(wb_vaf_m, sn_m,
+               style=createStyle(textDecoration="bold", fgFill="#E2EFDA"),
+               rows=1, cols=1:4, gridExpand=TRUE)
+      if (nrow(cl_corrs_m) > 0) {
+        best_idx_m <- which.max(cl_corrs_m$pearson_r) + 1
+        addStyle(wb_vaf_m, sn_m, style=createStyle(fgFill="#C6EFCE"),
+                 rows=best_idx_m, cols=1:4, gridExpand=TRUE)
+      }
+      setColWidths(wb_vaf_m, sn_m, cols=1:4, widths=c(22,12,14,10))
+    }
+    addWorksheet(wb_vaf_m, "Summary"); writeData(wb_vaf_m, "Summary", summary_vaf_m)
+    saveWorkbook(wb_vaf_m,
+                 file.path(vaf_out_dir, "VAF_VRC_correlation_merged_clusters.xlsx"),
+                 overwrite=TRUE)
+    cat("Saved: VAF_VRC_correlation_merged_clusters.xlsx\n")
+  } else {
+    cat("  Skipping VAF/VRC correlation (ref_profiles not available)\n")
+  }
+
+  # -- MCA cell type correlation on merged clusters ----------------------------
+  cat("Running MCA cell type correlation on merged clusters...\n")
+  run_mca_correlation(
+    expr_mat          = merged_expr,
+    cluster_vec_input = cluster_vec_m,
+    cluster_levels_input = cluster_levels_m,
+    to_sym_fn         = to_sym,
+    out_path          = file.path(vaf_out_dir,
+                                   "MCA_celltype_correlation_merged_clusters.xlsx"),
+    label             = "merged"
+  )
+
+  cat("\nCombinedwithVAFPaperPlots complete.\n")
+  cat("Output folder:", vaf_out_dir, "\n")
+  cat("Files written:\n")
+  for (f in list.files(vaf_out_dir)) cat(" -", f, "\n")
+
+} # end if vaf_counts_f2 exists
 
 # ==============================================================================
 # Cluster marker genes: hybrid expression score per cluster

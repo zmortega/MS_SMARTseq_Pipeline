@@ -1,10 +1,9 @@
 Warning messages:
 1: package ‘DESeq2’ was built under R version 4.4.3 
 2: package ‘matrixStats’ was built under R version 4.4.3 
-3: package ‘ggplot2’ was built under R version 4.4.3 
-4: package ‘ggrepel’ was built under R version 4.4.3 
-5: package ‘dplyr’ was built under R version 4.4.3 
-6: package ‘tidyr’ was built under R version 4.4.3 
+3: package ‘ggrepel’ was built under R version 4.4.3 
+4: package ‘dplyr’ was built under R version 4.4.3 
+5: package ‘tidyr’ was built under R version 4.4.3 
 Warning message:
 package ‘Matrix’ was built under R version 4.4.3 
 Script copied to: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/scripts/per_strain_plots.R 
@@ -69,8 +68,9 @@ Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/e
     PCs selected: 41 (80.5% variance explained)
   Running all-gene PCA for clustering...
   PCs selected: 47 (80.4% variance)
-  Running Leiden clustering (resolution=0.5)...
-  Clusters found: 1 
+  Cells: 73 | Leiden resolution: 1.5 | n_neighbors: 14 
+  Running Leiden clustering...
+  Clusters found: 9 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/umap_NOD_by_cluster.pdf 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/umap_NOD_by_population.pdf 
 
@@ -130,8 +130,9 @@ Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/
     PCs selected: 32 (80.5% variance explained)
   Running all-gene PCA for clustering...
   PCs selected: 35 (81.3% variance)
-  Running Leiden clustering (resolution=0.5)...
-  Clusters found: 1 
+  Cells: 58 | Leiden resolution: 1.5 | n_neighbors: 11 
+  Running Leiden clustering...
+  Clusters found: 10 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/umap_B6G7_by_cluster.pdf 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/umap_B6G7_by_population.pdf 
 
@@ -191,8 +192,9 @@ Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_
     PCs selected: 14 (81.0% variance explained)
   Running all-gene PCA for clustering...
   PCs selected: 15 (81.0% variance)
-  Running Leiden clustering (resolution=0.5)...
-  Clusters found: 1 
+  Cells: 36 | Leiden resolution: 1.2 | n_neighbors: 8 
+  Running Leiden clustering...
+  Clusters found: 4 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/umap_B6MHCIIGFP_by_cluster.pdf 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/umap_B6MHCIIGFP_by_population.pdf 
 
@@ -252,8 +254,9 @@ Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODPDL1_plo
     PCs selected: 39 (80.6% variance explained)
   Running all-gene PCA for clustering...
   PCs selected: 44 (81.1% variance)
-  Running Leiden clustering (resolution=0.5)...
-  Clusters found: 1 
+  Cells: 68 | Leiden resolution: 1.5 | n_neighbors: 13 
+  Running Leiden clustering...
+  Clusters found: 16 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODPDL1_plots/umap_NODPDL1_by_cluster.pdf 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODPDL1_plots/umap_NODPDL1_by_population.pdf 
 
@@ -306,6 +309,8 @@ Warning message:
 In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
   for 'All strains — 235 cells by strain & population' in 'mbcsToSbcs': - substituted for — (U+2014)
 Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/combined_plots/umap_all372_by_strain_population.pdf 
+Generating per-strain panels on comprehensive UMAP coordinates...
+Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/combined_plots/umap_per_strain_on_comprehensive.pdf 
 
 Combined UMAPs complete.
 
@@ -362,9 +367,30 @@ Running cell identity scoring against CellMarker 2.0...
     Combined cluster 2 
     Combined cluster 3 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/combined_plots/cell_identity_combined_clusters.xlsx 
+
+Running Mouse Cell Atlas expression profile correlation (combined)...
+  Trying: https://github.com/rnabioco/clustifyrdata/raw/main/data/ref_MCA.rda 
+  Download successful
+  ref_MCA loaded: 8601 genes x 713 cell types
+  Common genes for MCA correlation: 6576 
+  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/combined_plots/MCA_celltype_correlation_combined_clusters.xlsx 
+
+Running VAF/VRC correlation analysis (Clarke et al. 2025)...
+  Loading Clarke et al. mouse count matrix...
+  Reference matrix: 45706 genes x 188 cells
+  CD45neg cells (B-H plates): 164 
+  Clustering reference CD45neg cells to assign VAF/VRC labels...
+  VAF cells identified: 64 
+  VRC cells identified: 100 
+  VAF score check - VAF cluster: 1.169 VRC cluster: 0.506 
+  VRC score check - VRC cluster: 4.976 VAF cluster: 0.178 
+  Computing correlations against combined Leiden clusters...
+  Common genes for correlation: 8191 
+  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/combined_plots/VAF_VRC_correlation_combined_clusters.xlsx 
   Scoring per-strain clusters...
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/cell_identity_NOD_clusters.xlsx 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/cell_identity_B6G7_clusters.xlsx 
+    Cluster 2 - insufficient Wilcoxon markers ( 0 ), using top expressed genes
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/cell_identity_B6MHCIIGFP_clusters.xlsx 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODPDL1_plots/cell_identity_NODPDL1_clusters.xlsx 
 
@@ -385,6 +411,83 @@ All outputs complete. Output structure:
    - cluster_marker_genes.xlsx
    - heatmap_cluster_markers.pdf
 ==============================================================
+
+==============================================================
+Building CombinedwithVAFPaperPlots analysis...
+==============================================================
+Loading Clarke et al. mouse count matrix...
+Clarke matrix: 45706 genes x 188 cells
+Clarke genes mappable to your Ensembl IDs: 8322 
+Applying MHCII filter to Clarke cells...
+Clarke cells passing MHCII filter: 117 / 188 
+Running DESeq2 VST on Clarke cells...
+Clarke VAF cells: 96 | VRC cells: 96 
+converting counts to integer mode
+Clarke VST complete: 8160 genes x 117 cells
+Common Ensembl IDs for merged matrix: 8160 
+Merged matrix (pre-correction): 8160 genes x 352 cells
+Merged metadata: 352 rows
+  Batch composition — yours: 235 | clarke: 117 
+  Batch correction applied (limma::removeBatchEffect)
+Merged matrix (post-correction): 8160 genes x 352 cells
+Running HVG selection on merged matrix...
+Running PCA + UMAP (merged)...
+    PCs selected: 130 (80.1% variance explained)
+Running all-gene PCA for Leiden clustering (merged)...
+PCs selected (merged all-gene): 152 (80.2% variance)
+Running Leiden clustering (merged)...
+Clusters found: 4 
+Saved: umap_merged_by_cluster.pdf
+Saved: umap_merged_by_strain_population.pdf
+Saved: umap_per_strain_on_merged.pdf
+Generating merged cluster bar charts...
+Saved: barplots_cluster_composition.pdf
+Running Wilcoxon marker gene analysis on merged clusters...
+Saved: cluster_marker_genes.xlsx
+Generating merged cluster marker heatmap...
+Heatmap genes: 60 
+'magick' package is suggested to install to give better rasterization.
+
+Set `ht_opt$message = FALSE` to turn off this message.
+Saved: heatmap_cluster_markers.pdf
+Generating merged cluster violin plots...
+Saved: violin_plots_by_cluster.pdf
+Running VAF/VRC correlation on merged clusters...
+Saved: VAF_VRC_correlation_merged_clusters.xlsx
+Running MCA cell type correlation on merged clusters...
+  ref_MCA loaded: 8601 genes x 713 cell types
+  Common genes for MCA correlation: 6403 
+  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/CombinedwithVAFPaperPlots/MCA_celltype_correlation_merged_clusters.xlsx 
+
+CombinedwithVAFPaperPlots complete.
+Output folder: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/CombinedwithVAFPaperPlots 
+Files written:
+ - barplots_cluster_composition.pdf 
+ - cluster_marker_genes.xlsx 
+ - heatmap_cluster_markers.pdf 
+ - MCA_celltype_correlation_merged_clusters.xlsx 
+ - umap_merged_by_cluster.pdf 
+ - umap_merged_by_strain_population.pdf 
+ - umap_per_strain_on_merged.pdf 
+ - VAF_VRC_correlation_merged_clusters.xlsx 
+ - violin_plots_by_cluster.pdf 
+Warning messages:
+1: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  for 'Your cells + Clarke 2025 — 352 cells by Leiden cluster' in 'mbcsToSbcs': - substituted for — (U+2014)
+2: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  for 'Your cells + Clarke 2025 — 352 cells by strain & population' in 'mbcsToSbcs': - substituted for — (U+2014)
+3: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  for 'Strain & population — counts' in 'mbcsToSbcs': - substituted for — (U+2014)
+4: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  for 'Strain & population — proportions' in 'mbcsToSbcs': - substituted for — (U+2014)
+5: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  for 'Strain — counts' in 'mbcsToSbcs': - substituted for — (U+2014)
+6: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  for 'Strain — proportions' in 'mbcsToSbcs': - substituted for — (U+2014)
+7: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  for 'Merged cluster composition — 4 clusters | n=352 cells' in 'mbcsToSbcs': - substituted for — (U+2014)
+8: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  for 'Merged cluster marker genes — 60 genes x 352 cells' in 'mbcsToSbcs': - substituted for — (U+2014)
 
 ==============================================================
 All outputs complete. Output structure:
