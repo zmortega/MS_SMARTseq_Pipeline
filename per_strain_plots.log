@@ -66,11 +66,9 @@ Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/e
   -- Per-strain UMAP --
   Running UMAP (HVGs)...
     PCs selected: 41 (80.5% variance explained)
-  Running all-gene PCA for clustering...
-  PCs selected: 47 (80.4% variance)
-  Cells: 73 | Leiden resolution: 1.5 | n_neighbors: 14 
-  Running Leiden clustering...
-  Clusters found: 9 
+  Cells: 73 | Leiden resolution: 0.8 | n_neighbors: 12 
+  Running Leiden clustering on UMAP coordinates...
+  Clusters found: 4 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/umap_NOD_by_cluster.pdf 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/umap_NOD_by_population.pdf 
 
@@ -128,11 +126,9 @@ Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/
   -- Per-strain UMAP --
   Running UMAP (HVGs)...
     PCs selected: 32 (80.5% variance explained)
-  Running all-gene PCA for clustering...
-  PCs selected: 35 (81.3% variance)
-  Cells: 58 | Leiden resolution: 1.5 | n_neighbors: 11 
-  Running Leiden clustering...
-  Clusters found: 10 
+  Cells: 58 | Leiden resolution: 0.8 | n_neighbors: 9 
+  Running Leiden clustering on UMAP coordinates...
+  Clusters found: 4 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/umap_B6G7_by_cluster.pdf 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/umap_B6G7_by_population.pdf 
 
@@ -190,11 +186,9 @@ Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_
   -- Per-strain UMAP --
   Running UMAP (HVGs)...
     PCs selected: 14 (81.0% variance explained)
-  Running all-gene PCA for clustering...
-  PCs selected: 15 (81.0% variance)
-  Cells: 36 | Leiden resolution: 1.2 | n_neighbors: 8 
-  Running Leiden clustering...
-  Clusters found: 4 
+  Cells: 36 | Leiden resolution: 0.6 | n_neighbors: 6 
+  Running Leiden clustering on UMAP coordinates...
+  Clusters found: 3 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/umap_B6MHCIIGFP_by_cluster.pdf 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/umap_B6MHCIIGFP_by_population.pdf 
 
@@ -252,11 +246,9 @@ Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODPDL1_plo
   -- Per-strain UMAP --
   Running UMAP (HVGs)...
     PCs selected: 39 (80.6% variance explained)
-  Running all-gene PCA for clustering...
-  PCs selected: 44 (81.1% variance)
-  Cells: 68 | Leiden resolution: 1.5 | n_neighbors: 13 
-  Running Leiden clustering...
-  Clusters found: 16 
+  Cells: 68 | Leiden resolution: 0.8 | n_neighbors: 11 
+  Running Leiden clustering on UMAP coordinates...
+  Clusters found: 3 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODPDL1_plots/umap_NODPDL1_by_cluster.pdf 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODPDL1_plots/umap_NODPDL1_by_population.pdf 
 
@@ -369,8 +361,6 @@ Running cell identity scoring against CellMarker 2.0...
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/combined_plots/cell_identity_combined_clusters.xlsx 
 
 Running Mouse Cell Atlas expression profile correlation (combined)...
-  Trying: https://github.com/rnabioco/clustifyrdata/raw/main/data/ref_MCA.rda 
-  Download successful
   ref_MCA loaded: 8601 genes x 713 cell types
   Common genes for MCA correlation: 6576 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/combined_plots/MCA_celltype_correlation_combined_clusters.xlsx 
@@ -389,10 +379,28 @@ Running VAF/VRC correlation analysis (Clarke et al. 2025)...
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/combined_plots/VAF_VRC_correlation_combined_clusters.xlsx 
   Scoring per-strain clusters...
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/cell_identity_NOD_clusters.xlsx 
+  Running MCA correlation for NOD ...
+  ref_MCA loaded: 8601 genes x 713 cell types
+  Common genes for MCA correlation: 8071 
+  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/MCA_celltype_correlation_NOD_clusters.xlsx 
+    Cluster 3 - insufficient Wilcoxon markers ( 0 ), using top expressed genes
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/cell_identity_B6G7_clusters.xlsx 
-    Cluster 2 - insufficient Wilcoxon markers ( 0 ), using top expressed genes
+  Running MCA correlation for B6G7 ...
+  ref_MCA loaded: 8601 genes x 713 cell types
+  Common genes for MCA correlation: 7734 
+  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/MCA_celltype_correlation_B6G7_clusters.xlsx 
+    Cluster 1 - insufficient Wilcoxon markers ( 0 ), using top expressed genes
+    Cluster 3 - insufficient Wilcoxon markers ( 3 ), using top expressed genes
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/cell_identity_B6MHCIIGFP_clusters.xlsx 
+  Running MCA correlation for B6MHCIIGFP ...
+  ref_MCA loaded: 8601 genes x 713 cell types
+  Common genes for MCA correlation: 6841 
+  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/MCA_celltype_correlation_B6MHCIIGFP_clusters.xlsx 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODPDL1_plots/cell_identity_NODPDL1_clusters.xlsx 
+  Running MCA correlation for NODPDL1 ...
+  ref_MCA loaded: 8601 genes x 713 cell types
+  Common genes for MCA correlation: 7951 
+  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODPDL1_plots/MCA_celltype_correlation_NODPDL1_clusters.xlsx 
 
 Generating combined cluster violin plots...
   Genes to plot: Ptprc 
@@ -454,6 +462,8 @@ Generating merged cluster violin plots...
 Saved: violin_plots_by_cluster.pdf
 Running VAF/VRC correlation on merged clusters...
 Saved: VAF_VRC_correlation_merged_clusters.xlsx
+Running CellMarker cell identity scoring on merged clusters...
+Saved: cell_identity_merged_clusters.xlsx
 Running MCA cell type correlation on merged clusters...
   ref_MCA loaded: 8601 genes x 713 cell types
   Common genes for MCA correlation: 6403 
@@ -463,6 +473,7 @@ CombinedwithVAFPaperPlots complete.
 Output folder: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/CombinedwithVAFPaperPlots 
 Files written:
  - barplots_cluster_composition.pdf 
+ - cell_identity_merged_clusters.xlsx 
  - cluster_marker_genes.xlsx 
  - heatmap_cluster_markers.pdf 
  - MCA_celltype_correlation_merged_clusters.xlsx 

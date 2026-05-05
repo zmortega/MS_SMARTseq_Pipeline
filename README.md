@@ -135,16 +135,17 @@ results/
 │   ├── raw_counts.txt
 │   └── counts_clean.txt
 ├── 05_dge/
-│   ├── NOD_plots/                            (12 files)
+│   ├── NOD_plots/                            (13 files)
 │   │   ├── expression_matrix_NOD.csv
 │   │   ├── volcano_NOD_*.pdf                 (3 files)
 │   │   ├── violins_NOD_*.pdf                 (3 files)
 │   │   ├── umap_NOD_by_cluster.pdf
 │   │   ├── umap_NOD_by_population.pdf
-│   │   └── cell_identity_NOD_clusters.xlsx
-│   ├── B6G7_plots/                           (same 12 files)
-│   ├── B6MHCIIGFP_plots/                     (same 12 files)
-│   ├── NODPDL1_plots/                        (same 12 files)
+│   │   ├── cell_identity_NOD_clusters.xlsx
+│   │   └── MCA_celltype_correlation_NOD_clusters.xlsx
+│   ├── B6G7_plots/                           (same 13 files)
+│   ├── B6MHCIIGFP_plots/                     (same 13 files)
+│   ├── NODPDL1_plots/                        (same 13 files)
 │   ├── combined_plots/
 │   │   ├── umap_all_by_cluster.pdf
 │   │   ├── umap_all_by_strain_population.pdf
@@ -164,6 +165,7 @@ results/
 │       ├── cluster_marker_genes.xlsx
 │       ├── heatmap_cluster_markers.pdf
 │       ├── violin_plots_by_cluster.pdf
+│       ├── cell_identity_merged_clusters.xlsx
 │       ├── VAF_VRC_correlation_merged_clusters.xlsx
 │       └── MCA_celltype_correlation_merged_clusters.xlsx
 └── qc_summary/
@@ -223,7 +225,7 @@ Ranks use combined score `log2FC × -log10(padj)`.
 
 ### Per-strain UMAPs
 
-- `umap_{STRAIN}_by_cluster.pdf` — Leiden clusters (all-gene PCA for clustering, HVG UMAP for visualization)
+- `umap_{STRAIN}_by_cluster.pdf` — Leiden clusters (kNN graph built on UMAP coordinates for small-n stability, HVG UMAP for visualization)
 - `umap_{STRAIN}_by_population.pdf` — colored by CD45+/MHCIIhi/MHCIIlo condition
 
 ### Cell identity scoring (per-strain and combined)
@@ -232,6 +234,10 @@ Fisher's exact test + Jaccard similarity against CellMarker 2.0 mouse reference
 (downloaded at runtime, cached). Falls back to 20-cell-type built-in set if
 download fails. When Wilcoxon markers are insufficient, falls back to top
 expressed genes.
+
+Excel workbook format (all folders):
+- **Summary tab** — top 5 cell type candidates per cluster with rank, cell_type, fisher_pval
+- **Per-cluster tabs** — full ranked list of all tested cell types with Fisher p-value, BH-adjusted p-value, Jaccard similarity, odds ratio, and overlapping gene symbols
 
 ### Combined UMAP (your 4 strains)
 

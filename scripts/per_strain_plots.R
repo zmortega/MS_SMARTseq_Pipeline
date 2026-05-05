@@ -274,12 +274,7 @@ run_mca_correlation <- function(expr_mat, cluster_vec_input, cluster_levels_inpu
     rows=1, cols=1:4, gridExpand=TRUE)
   setColWidths(wb_mca, "Summary_top5", cols=1:4, widths=c(12,8,40,12))
 
-  # Move Summary to first tab
-  worksheetOrder(wb_mca) <- c(
-    which(names(wb_mca) == "Summary_top5"),
-    which(names(wb_mca) != "Summary_top5")
-  )
-
+  # (Summary_top5 was added first so it is already the first tab)
   saveWorkbook(wb_mca, out_path, overwrite=TRUE)
   cat("  Saved:", out_path, "\n")
 }
@@ -640,30 +635,19 @@ for (strain in strains) {
                               condition = s_meta[rownames(s_umap), "condition"],
                               stringsAsFactors=FALSE)
 
-  # All-gene PCA for Leiden
-  cat("  Running all-gene PCA for clustering...\n")
-  s_pca_all    <- prcomp(t(expr), center=TRUE, scale.=FALSE)
-  s_var_all    <- s_pca_all$sdev^2 / sum(s_pca_all$sdev^2)
-  s_cum_all    <- cumsum(s_var_all)
-  s_n_pcs      <- max(2, which(s_cum_all >= VAR_THRESHOLD)[1])
-  cat("  PCs selected:", s_n_pcs,
-      sprintf("(%.1f%% variance)\n", s_cum_all[s_n_pcs]*100))
-  s_pcs_all    <- s_pca_all$x[, 1:s_n_pcs, drop=FALSE]
-
-  # Scale Leiden parameters for per-strain cell counts
-  # Target: ~3-5 clusters per strain
-  # NOTE: with small cell counts, higher resolution is needed to overcome
-  # sparse kNN graphs — counterintuitively, low res collapses everything to 1
+  # Leiden clustering directly on UMAP coordinates
+  # For small per-strain datasets, UMAP coords capture the visual structure
+  # better than all-gene PCA for Leiden, avoiding the 1-cluster collapse
   n_cells_s    <- ncol(expr)
-  s_neighbors  <- max(8, floor(n_cells_s / 5))
-  s_resolution <- ifelse(n_cells_s < 50,  1.2,
-                  ifelse(n_cells_s < 80,  1.5,
-                  ifelse(n_cells_s < 120, 1.8, LEIDEN_RESOLUTION)))
+  s_neighbors  <- max(5, floor(n_cells_s / 6))
+  s_resolution <- ifelse(n_cells_s < 50,  0.6,
+                  ifelse(n_cells_s < 80,  0.8,
+                  ifelse(n_cells_s < 120, 1.0, LEIDEN_RESOLUTION)))
   cat("  Cells:", n_cells_s, "| Leiden resolution:", s_resolution,
       "| n_neighbors:", s_neighbors, "\n")
 
-  cat("  Running Leiden clustering...\n")
-  s_leiden     <- run_leiden(s_pcs_all, resolution=s_resolution,
+  cat("  Running Leiden clustering on UMAP coordinates...\n")
+  s_leiden     <- run_leiden(s_umap, resolution=s_resolution,
                               n_neighbors=s_neighbors)
   s_umap_df$cluster <- as.character(s_leiden)
   s_n_clust    <- length(unique(s_umap_df$cluster))
@@ -1528,18 +1512,23 @@ cat("  Scoring combined clusters...\n")
 wb_cellid_comb <- createWorkbook()
 
 # Summary sheet
+# Build top-5 summary for combined cell identity
+comb_sum_top5 <- do.call(rbind, lapply(names(all_markers), function(cl) {
+  if (is.null(all_markers[[cl]]) || nrow(all_markers[[cl]]) == 0) return(NULL)
+  sc_tmp <- score_cluster(all_markers[[cl]]$gene_symbol, cell_db, universe_size)
+  if (nrow(sc_tmp) == 0) return(NULL)
+  top5 <- head(sc_tmp, 5)
+  data.frame(cluster=cl, rank=seq_len(nrow(top5)),
+             cell_type=top5$cell_type,
+             fisher_pval=signif(top5$fisher_pval, 3),
+             stringsAsFactors=FALSE)
+}))
 addWorksheet(wb_cellid_comb, "Summary")
-writeData(wb_cellid_comb, "Summary",
-          data.frame(
-            cluster      = names(all_markers),
-            n_markers    = sapply(all_markers, nrow),
-            top_cell_type = sapply(names(all_markers), function(cl) {
-              if (is.null(all_markers[[cl]]) || nrow(all_markers[[cl]]) == 0)
-                return("insufficient markers")
-              sc <- score_cluster(all_markers[[cl]]$gene_symbol, cell_db, universe_size)
-              if (nrow(sc) > 0) sc$cell_type[1] else "no match"
-            })
-          ))
+writeData(wb_cellid_comb, "Summary", comb_sum_top5)
+addStyle(wb_cellid_comb, "Summary",
+  style=createStyle(textDecoration="bold", fgFill="#D9E1F2"),
+  rows=1, cols=1:4, gridExpand=TRUE)
+setColWidths(wb_cellid_comb, "Summary", cols=1:4, widths=c(10,6,35,12))
 
 for (cl_label in names(all_markers)) {
   cat("    Combined cluster", cl_label, "\n")
@@ -1845,12 +1834,27 @@ for (strain in strains) {
     cluster_results[[cl_label]] <- sc_s
   }
 
+  # Build top-5 summary (matching MCA format: rank, cell_type, fisher_pval)
+  strain_summary_top5 <- do.call(rbind, lapply(names(cluster_results), function(cl) {
+    df <- cluster_results[[cl]]
+    if (is.null(df) || nrow(df) == 0) return(NULL)
+    top5 <- head(df, 5)
+    data.frame(
+      cluster       = cl,
+      rank          = seq_len(nrow(top5)),
+      cell_type     = top5$cell_type,
+      fisher_pval   = signif(top5$fisher_pval, 3),
+      stringsAsFactors = FALSE
+    )
+  }))
+
   # Write Summary sheet first so it appears as the first tab
   addWorksheet(wb_strain, "Summary")
-  writeData(wb_strain, "Summary", strain_summary)
+  writeData(wb_strain, "Summary", strain_summary_top5)
   addStyle(wb_strain, "Summary",
     style=createStyle(textDecoration="bold", fgFill="#FCE4D6"),
-    rows=1, cols=1:3, gridExpand=TRUE)
+    rows=1, cols=1:4, gridExpand=TRUE)
+  setColWidths(wb_strain, "Summary", cols=1:4, widths=c(10, 6, 35, 12))
 
   # Then write cluster sheets
   for (cl_label in names(cluster_results)) {
@@ -1868,6 +1872,19 @@ for (strain in strains) {
                                    paste0("cell_identity_", strain, "_clusters.xlsx"))
   saveWorkbook(wb_strain, strain_cellid_path, overwrite=TRUE)
   cat("  Saved:", strain_cellid_path, "\n")
+
+  # MCA expression profile correlation for this strain
+  cat("  Running MCA correlation for", strain, "...\n")
+  run_mca_correlation(
+    expr_mat          = s_info$expr,
+    cluster_vec_input = s_cluster_vec,
+    cluster_levels_input = s_levels,
+    to_sym_fn         = to_sym,
+    out_path          = file.path(dge_dir, paste0(strain, "_plots"),
+                                   paste0("MCA_celltype_correlation_",
+                                          strain, "_clusters.xlsx")),
+    label             = strain
+  )
 }
 
 # ==============================================================================
@@ -2544,6 +2561,77 @@ if (!file.exists(vaf_counts_f2)) {
   }
 
   # -- MCA cell type correlation on merged clusters ----------------------------
+  # -- CellMarker gene set scoring on merged clusters -------------------------
+  cat("Running CellMarker cell identity scoring on merged clusters...\n")
+  wb_cellid_m <- createWorkbook()
+  cluster_results_m_ci <- list()
+
+  summary_cellid_m <- data.frame(cluster=character(), n_markers=integer(),
+                                   top_cell_type=character(),
+                                   stringsAsFactors=FALSE)
+  for (cl_label in as.character(cluster_levels_m)) {
+    cl_cells_m   <- names(cluster_vec_m)[cluster_vec_m == cl_label]
+    rest_cells_m <- names(cluster_vec_m)[cluster_vec_m != cl_label]
+
+    syms_m <- character(0)
+    if (length(cl_cells_m) >= 2 && length(rest_cells_m) >= 2) {
+      mean_cl_m   <- rowMeans(merged_expr[, cl_cells_m,   drop=FALSE])
+      mean_rest_m <- rowMeans(merged_expr[, rest_cells_m, drop=FALSE])
+      lfc_m       <- mean_cl_m - mean_rest_m
+      cands_m     <- names(lfc_m)[lfc_m >= MIN_LOG2FC]
+      if (length(cands_m) >= 2) {
+        pv_m <- sapply(cands_m, function(g)
+          wilcox.test(merged_expr[g, cl_cells_m], merged_expr[g, rest_cells_m],
+                      alternative="greater", exact=FALSE)$p.value)
+        pa_m <- p.adjust(pv_m, method="BH")
+        sig_m <- cands_m[pa_m < MAX_PADJ]
+        syms_m <- unique(to_sym(sig_m)); syms_m <- syms_m[syms_m != ""]
+      }
+    }
+    if (length(syms_m) < 10) {
+      mean_cl_m   <- if (length(cl_cells_m)==1) merged_expr[,cl_cells_m]
+                     else rowMeans(merged_expr[,cl_cells_m,drop=FALSE])
+      top_ens_m   <- names(sort(mean_cl_m, decreasing=TRUE))[1:min(50,length(mean_cl_m))]
+      syms_m      <- unique(to_sym(top_ens_m)); syms_m <- syms_m[syms_m != ""]
+    }
+    sc_m   <- score_cluster(syms_m, cell_db, universe_size)
+    top_ct_m <- if (nrow(sc_m) > 0) sc_m$cell_type[1] else "no match"
+    summary_cellid_m <- rbind(summary_cellid_m,
+                               data.frame(cluster=cl_label,
+                                          n_markers=length(syms_m),
+                                          top_cell_type=top_ct_m,
+                                          stringsAsFactors=FALSE))
+    cluster_results_m_ci[[cl_label]] <- sc_m
+    sn_ci <- paste0("Cluster_", cl_label)
+    addWorksheet(wb_cellid_m, sn_ci); writeData(wb_cellid_m, sn_ci, sc_m)
+    addStyle(wb_cellid_m, sn_ci,
+      style=createStyle(textDecoration="bold", fgFill="#D9E1F2"),
+      rows=1, cols=1:10, gridExpand=TRUE)
+    setColWidths(wb_cellid_m, sn_ci, cols=1:10,
+      widths=c(5,25,10,14,12,10,12,12,12,40))
+  }
+  # Build top-5 summary for merged cell identity
+  merged_sum_top5 <- do.call(rbind, lapply(names(cluster_results_m_ci), function(cl) {
+    df <- cluster_results_m_ci[[cl]]
+    if (is.null(df) || nrow(df) == 0) return(NULL)
+    top5 <- head(df, 5)
+    data.frame(cluster=cl, rank=seq_len(nrow(top5)),
+               cell_type=top5$cell_type,
+               fisher_pval=signif(top5$fisher_pval, 3),
+               stringsAsFactors=FALSE)
+  }))
+  addWorksheet(wb_cellid_m, "Summary")
+  writeData(wb_cellid_m, "Summary", merged_sum_top5)
+  addStyle(wb_cellid_m, "Summary",
+    style=createStyle(textDecoration="bold", fgFill="#D9E1F2"),
+    rows=1, cols=1:4, gridExpand=TRUE)
+  setColWidths(wb_cellid_m, "Summary", cols=1:4, widths=c(10,6,35,12))
+  saveWorkbook(wb_cellid_m,
+               file.path(vaf_out_dir, "cell_identity_merged_clusters.xlsx"),
+               overwrite=TRUE)
+  cat("Saved: cell_identity_merged_clusters.xlsx\n")
+
+  # -- MCA correlation on merged clusters -------------------------------------
   cat("Running MCA cell type correlation on merged clusters...\n")
   run_mca_correlation(
     expr_mat          = merged_expr,
