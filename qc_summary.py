@@ -22,22 +22,30 @@ def load_config(path):
         return yaml.safe_load(f)
 
 
-def parse_star_log(log_file: Path) -> dict:
-    """Extract key mapping stats from STAR Log.final.out"""
+def parse_hisat2_log(log_file: Path) -> dict:
+    """Extract key mapping stats from a HISAT2 stderr summary (*_hisat2.log).
+
+    HISAT2's summary reports the read/pair count and an "overall alignment
+    rate" rather than STAR's "uniquely mapped" figure, so `uniquely_mapped`
+    here is really "mapped reads" (total_reads * overall_rate) — the closest
+    available proxy, used only to gate on read depth.
+    """
     stats = {}
-    patterns = {
-        "total_reads":       r"Number of input reads \|\s+([\d]+)",
-        "uniquely_mapped":   r"Uniquely mapped reads number \|\s+([\d]+)",
-        "mapping_rate":      r"Uniquely mapped reads % \|\s+([\d.]+)%",
-        "multi_mapped":      r"Number of reads mapped to multiple loci \|\s+([\d]+)",
-        "unmapped_too_short":r"% of reads unmapped: too short \|\s+([\d.]+)%",
-    }
     text = log_file.read_text()
-    for key, pat in patterns.items():
-        m = re.search(pat, text)
-        if m:
-            val = m.group(1)
-            stats[key] = float(val) if "." in val or key == "mapping_rate" else int(val)
+
+    m = re.search(r"^\s*([\d]+) reads; of these:", text, re.MULTILINE)
+    if m:
+        stats["total_reads"] = int(m.group(1))
+
+    m = re.search(r"([\d.]+)% overall alignment rate", text)
+    if m:
+        stats["mapping_rate"] = float(m.group(1))
+
+    if "total_reads" in stats and "mapping_rate" in stats:
+        stats["uniquely_mapped"] = int(round(
+            stats["total_reads"] * stats["mapping_rate"] / 100
+        ))
+
     return stats
 
 
@@ -68,16 +76,16 @@ def main():
     min_reads = cfg.get("MIN_READS_MAPPED", 500000)
     min_rate  = cfg.get("MIN_MAPPING_RATE", 0.60)
 
-    # ── Parse STAR logs ────────────────────────────────────────────────────────
+    # ── Parse HISAT2 logs ──────────────────────────────────────────────────────
     records = []
-    for star_log in sorted(align_dir.glob("*/*Log.final.out")):
-        cell_id = star_log.parent.name
-        stats = parse_star_log(star_log)
+    for h2_log in sorted(align_dir.glob("*/*_hisat2.log")):
+        cell_id = h2_log.name.replace("_hisat2.log", "")
+        stats = parse_hisat2_log(h2_log)
         stats["cell_id"] = cell_id
         records.append(stats)
 
     if not records:
-        print(f"No STAR logs found in {align_dir}. Run alignment first.")
+        print(f"No HISAT2 logs found in {align_dir}. Run alignment first.")
         return
 
     df_star = pd.DataFrame(records).set_index("cell_id")

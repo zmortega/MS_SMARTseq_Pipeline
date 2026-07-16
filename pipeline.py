@@ -187,7 +187,7 @@ def step_align(cells, cfg, log, resume):
         # HISAT2 can read gzipped FASTQs natively on Mac
         cmd = (
             f"hisat2 "
-            f"-p {cfg['STAR_THREADS']} "
+            f"-p {cfg['ALIGN_THREADS']} "
             f"--dta "
             f"-x {cfg['HISAT2_INDEX']} "
             f"-1 {r1p_gz} "
@@ -253,7 +253,13 @@ def step_featurecounts(cells, cfg, log, resume):
         log.info("  Decompressing GTF for featureCounts...")
         run(f"gunzip -k {gtf_gz}", log)
 
-    paired_flag = ""  # SMARTseq: count individual reads, not pairs
+    # BAMs are paired-end aligned (hisat2 -1/-2), so newer featureCounts/subread
+    # (>=2.0.3) requires -p just to declare that fact, or it hard-errors with
+    # "Paired-end reads were detected in single-end read library". Passing -p
+    # alone (without --countReadPairs) keeps the original per-read counting
+    # behavior intended here (each mate counted individually, not as one
+    # fragment) — see https://support.bioconductor.org/p/9159588/
+    paired_flag = "-p"  # SMARTseq: count individual reads, not pairs
     bam_list = " ".join(bams)
     out_counts = count_dir / "raw_counts.txt"
 

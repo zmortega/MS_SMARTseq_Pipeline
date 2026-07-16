@@ -26,13 +26,13 @@ FASTQ (R1/R2 per cell)
     ▼
 [5] per_strain_plots.R
         ├── MHCII expression filter (H2-Aa & H2-Ab1, applied globally)
-        ├── Per-strain DESeq2 (independent per plate, normalized to A1-A12)
-        │       ├── Volcano plots (3 per strain)
-        │       ├── Violin plots (3 per strain, top 20 DEGs each)
-        │       ├── Expression matrix CSV (mean VST + upregulation rankings)
+        ├── Per-strain DESeq2 (independent per plate, normalized to that plate's own reference wells)
+        │       ├── Volcano + violin plots (1 pair per contrast — contrasts built dynamically
+        │       │     from whichever conditions are present, e.g. 3 for MHCIIhi/lo plates, 1 for NODPDL1)
+        │       ├── Expression matrix CSV (mean VST + upregulation rankings, one rank column per contrast)
         │       ├── Per-strain UMAP (by cluster + by population)
         │       └── Cell identity Excel (CellMarker 2.0 gene set scoring)
-        ├── Combined analysis (all MHCII-filtered cells, your 4 strains)
+        ├── Combined analysis (all MHCII-filtered cells, grouped by strain_group)
         │       ├── Combined UMAP (by Leiden cluster + by strain/population)
         │       ├── Per-strain panels on comprehensive UMAP
         │       ├── Cluster composition bar charts (4 charts, 2x2 PDF)
@@ -135,17 +135,18 @@ results/
 │   ├── raw_counts.txt
 │   └── counts_clean.txt
 ├── 05_dge/
-│   ├── NOD_plots/                            (13 files)
+│   ├── NOD_plots/                            (file count varies with # of contrasts)
 │   │   ├── expression_matrix_NOD.csv
-│   │   ├── volcano_NOD_*.pdf                 (3 files)
-│   │   ├── violins_NOD_*.pdf                 (3 files)
+│   │   ├── volcano_NOD_*.pdf                 (1 per contrast)
+│   │   ├── violins_NOD_*.pdf                 (1 per contrast)
 │   │   ├── umap_NOD_by_cluster.pdf
 │   │   ├── umap_NOD_by_population.pdf
 │   │   ├── cell_identity_NOD_clusters.xlsx
 │   │   └── MCA_celltype_correlation_NOD_clusters.xlsx
-│   ├── B6G7_plots/                           (same 13 files)
-│   ├── B6MHCIIGFP_plots/                     (same 13 files)
-│   ├── NODPDL1_plots/                        (same 13 files)
+│   ├── NOD2_plots/                           (same layout, 3 contrasts)
+│   ├── B6G7_plots/                           (same layout, 3 contrasts)
+│   ├── B6MHCIIGFP_plots/                     (same layout, 3 contrasts)
+│   ├── NODPDL1_plots/                        (same layout, 1 contrast — single CD45neg_MHCIIpos condition)
 │   ├── combined_plots/
 │   │   ├── umap_all_by_cluster.pdf
 │   │   ├── umap_all_by_strain_population.pdf
@@ -201,13 +202,20 @@ Design: `~ condition`. VST via `varianceStabilizingTransformation()`.
 
 ### Per-strain contrasts
 
-| Comparison | Volcano | Violins |
-|---|---|---|
-| CD45+ MHCIIpos vs CD45− MHCIIhi | ✓ | ✓ |
-| CD45+ MHCIIpos vs CD45− MHCIIlo | ✓ | ✓ |
-| CD45− MHCIIhi vs CD45− MHCIIlo  | ✓ | ✓ |
+Contrasts are no longer hardcoded — `build_contrasts()` generates them per plate from
+whichever `condition` values are actually present in `data/metadata.csv`: the reference
+condition (`CD45pos_MHCIIpos`) vs. each non-reference condition, plus all pairwise
+comparisons among the non-reference conditions. This reproduces the original fixed
+3-contrast design for NOD/NOD2/B6G7/B6MHCIIGFP and collapses to a single contrast for
+NODPDL1 (only one non-reference condition, `CD45neg_MHCIIpos`):
 
-Each violin PDF: top 10 up + top 10 down DEGs, gene symbols, jittered VST points.
+| Plate(s) | Contrasts |
+|---|---|
+| NOD, NOD2, B6G7, B6MHCIIGFP | CD45+ MHCIIpos vs CD45− MHCIIhi · CD45+ MHCIIpos vs CD45− MHCIIlo · CD45− MHCIIhi vs CD45− MHCIIlo |
+| NODPDL1 | CD45+ MHCIIpos vs CD45− MHCIIpos |
+
+Each contrast gets one volcano PDF and one violin PDF (top 10 up + top 10 down DEGs,
+gene symbols, jittered VST points).
 
 ### Expression matrix columns
 
@@ -215,11 +223,8 @@ Each violin PDF: top 10 up + top 10 down DEGs, gene symbols, jittered VST points
 |---|---|
 | `ensembl_id` | Ensembl gene ID |
 | `gene_symbol` | Common gene name (GENCODE vM33) |
-| `mean_VST_CD45pos_MHCIIpos` | Mean VST expression |
-| `mean_VST_CD45neg_MHCIIhi` | Mean VST expression |
-| `mean_VST_CD45neg_MHCIIlo` | Mean VST expression |
-| `rank_upregulated_MHCIIhi` | Upregulation rank vs CD45pos (1 = most upregulated) |
-| `rank_upregulated_MHCIIlo` | Upregulation rank vs CD45pos (1 = most upregulated) |
+| `mean_VST_{condition}` | Mean VST expression, one column per condition present on that plate (e.g. `mean_VST_CD45pos_MHCIIpos`, `mean_VST_CD45neg_MHCIIhi`, ...) |
+| `rank_upregulated_{condition}` | Upregulation rank vs the reference condition (1 = most upregulated), one column per non-reference condition (e.g. `rank_upregulated_MHCIIhi`/`MHCIIlo` for most plates, `rank_upregulated_MHCIIpos` for NODPDL1) |
 
 Ranks use combined score `log2FC × -log10(padj)`.
 
@@ -239,14 +244,16 @@ Excel workbook format (all folders):
 - **Summary tab** — top 5 cell type candidates per cluster with rank, cell_type, fisher_pval
 - **Per-cluster tabs** — full ranked list of all tested cell types with Fisher p-value, BH-adjusted p-value, Jaccard similarity, odds ratio, and overlapping gene symbols
 
-### Combined UMAP (your 4 strains)
+### Combined UMAP (all strain groups)
 
 **UMAP embedding:** top 2000 HVG PCA → 80% variance PCs → `uwot::umap()`
 
 **Leiden clustering:** all-gene PCA → 80% variance PCs → kNN graph → Leiden
 
-**Per-strain panels:** 4-panel PDF showing each strain's cells on shared
-comprehensive UMAP coordinates, colored by comprehensive cluster assignment.
+**Per-strain-group panels:** one panel per `strain_group` (not per literal plate — NOD-family
+plates share a panel) showing that group's cells on shared comprehensive UMAP coordinates,
+colored by comprehensive cluster assignment. Colors and legend sizing scale dynamically with
+however many strain groups/conditions are present, rather than a fixed 4×3 palette.
 
 ### Cluster marker genes (Wilcoxon rank-sum)
 
@@ -343,13 +350,40 @@ python qc_summary.py --config config.yaml               # QC flagging
 
 ## Experiment-specific notes
 
-- **Strains:** NOD, B6G7, B6MHCIIGFP, NODPDL1
-- **Conditions:** `CD45pos_MHCIIpos` (A1–A12), `CD45neg_MHCIIhi` (B1–E6), `CD45neg_MHCIIlo` (E7–H12)
-- **Plate quirks:** B6MHCIIGFP wells H1–H12 empty; NODPDL1 layout physically flipped but metadata labels are biologically correct
-- **Batches:** B6G7 and B6MHCIIGFP = L001; NOD and NODPDL1 = L002
-- **Normalization reference:** CD45pos_MHCIIpos (A1–A12), per plate
+- **Plates/strains:** NOD, NOD2, B6G7, B6MHCIIGFP, NODPDL1 (`scripts/per_strain_plots.R` discovers
+  these dynamically from `data/metadata.csv` — no code changes needed to add NOD3, NOD4, etc.)
+- **Strain grouping:** `data/metadata.csv` has both a `strain` column (literal plate, used for
+  independent per-plate normalization/DESeq2/output folders) and a `strain_group` column
+  (biological grouping used for combined-analysis plots/colors). NOD-family plates (NOD, NOD2,
+  NOD3, ...) share `strain_group = NOD` and are shown together by default in combined plots;
+  NODPDL1 is biologically distinct and keeps its own group.
+- **NOD2:** originally delivered mislabeled as "NODPDL1" — same biological context as NOD (a
+  second, independent plate), renamed to NOD2 and relabeled `strain_group = NOD`.
+- **NODPDL1 (current):** a distinct plate/biology from NOD. Its 96 wells were originally split
+  across two sequencing lanes (L001 + L002) and were concatenated per well into single R1/R2
+  FASTQ pairs before running through the pipeline. Condition scheme differs from the other
+  plates — no MHCIIhi/MHCIIlo split, just a single CD45- MHCII+ population:
+  `CD45pos_MHCIIpos` (A1–A12, B1–B6, used as the normalization reference) and
+  `CD45neg_MHCIIpos` (B7–B12, C1–H12).
+- **NOD / B6G7 / B6MHCIIGFP / NOD2 conditions:** `CD45pos_MHCIIpos` (A1–A12), `CD45neg_MHCIIhi`
+  (B1–E6), `CD45neg_MHCIIlo` (E7–H12)
+- **Plate quirks:** B6MHCIIGFP wells H1–H12 empty; NOD2 (formerly mislabeled NODPDL1) layout
+  physically flipped but metadata labels are biologically correct
+- **Batches:** B6G7 and B6MHCIIGFP = batch1 (L001); NOD and NOD2 = batch2 (L002); NODPDL1 =
+  batch3 (L001+L002 merged)
+- **Normalization reference:** `CD45pos_MHCIIpos` wells, per plate (well range varies by plate —
+  see metadata)
+- **Contrasts:** built dynamically per plate from whichever conditions are present (3 contrasts
+  for the CD45pos/MHCIIhi/MHCIIlo design, 1 contrast for NODPDL1's simpler 2-condition design)
 - **DESeq2 design:** `~ condition` (no batch term; each strain is single-batch)
 - **VST method:** `varianceStabilizingTransformation()` (bypasses sample-size check in `vst()`)
 - **Aligner:** HISAT2 (switched from STAR due to Apple Silicon RAM constraints)
 - **Annotation:** GENCODE vM33 primary assembly GTF
+- **featureCounts:** run with `-p` (declares paired-end BAMs, required by subread ≥2.0.3 or it
+  hard-errors with "Paired-end reads were detected in single-end read library"). `-p` alone
+  (no `--countReadPairs`) preserves the original per-read counting behavior — each mate is
+  still counted individually, not as one fragment.
+- **QC summary:** `qc_summary.py` now parses HISAT2's `*_hisat2.log` stderr summary instead of
+  STAR's `Log.final.out`. HISAT2 doesn't report a "uniquely mapped" figure, so `uniquely_mapped`
+  is approximated as `total_reads × overall_alignment_rate` — used only to gate on read depth.
 - **Clarke et al. 2025:** Cell Reports 44, 116189. GEO: GSE292898. VAFs are CD45neg MHC-II+ fibroblastic cells from NOD mouse pancreatic islets.

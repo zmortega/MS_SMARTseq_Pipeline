@@ -7,7 +7,6 @@
 FASTQ_DIR: "/Users/zachortega/Documents/02092026_NOD_CD45_MHCII_RNAseq"
 OUTPUT_DIR: "results"
 REF_DIR: "reference"
-GENOME_DIR: "reference/star_index"
 HISAT2_INDEX: "reference/hisat2_index/GRCm39"
 
 # ── Reference files ────────────────────────────────────────────────────────────
@@ -27,10 +26,8 @@ TRIM_SLIDINGWINDOW: "4:15"
 TRIM_MINLEN: 36
 ADAPTER_FILE: "TruSeq3-PE.fa"
 
-# ── STAR alignment ─────────────────────────────────────────────────────────────
-STAR_THREADS: 6
-STAR_RAM: 16000000000
-STAR_EXTRA_ARGS: "--outSAMtype BAM SortedByCoordinate --outSAMattributes NH HI AS NM"
+# ── HISAT2 alignment ───────────────────────────────────────────────────────────
+ALIGN_THREADS: 6
 
 # ── featureCounts ──────────────────────────────────────────────────────────────
 FC_THREADS: 6

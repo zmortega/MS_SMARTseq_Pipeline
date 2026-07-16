@@ -11,16 +11,24 @@ suppressPackageStartupMessages({
 # per_strain_plots.R
 #
 # Runs fully independent per-strain DESeq2 analyses (one per plate), each
-# normalized using only that strain's CD45pos_MHCIIpos (A1-A12) wells for
-# size factor estimation. Produces 10 output files per strain:
-#   - 3 volcano PDFs
-#   - 3 violin PDFs (20 panels each: top 10 up + top 10 down by padj)
+# normalized using only that strain's own CD45pos_MHCIIpos reference wells for
+# size factor estimation. Strains/plates are discovered dynamically from
+# data/metadata.csv (strain column) — adding a new plate (e.g. NOD3) needs no
+# code changes here, just metadata rows. Produces, per strain:
+#   - 1 volcano + 1 violin PDF per contrast (3 of each for strains with the
+#       CD45pos/MHCIIhi/MHCIIlo design; fewer for plates with a simpler
+#       condition scheme, e.g. NODPDL1's single CD45neg population)
 #   - 1 expression matrix CSV (all genes, mean VST per condition group,
-#       upregulation rankings for MHCIIhi and MHCIIlo)
+#       upregulation ranking per non-reference condition)
 #   - 3 UMAP PDFs:
-#       1. All 3 populations, colored by population
-#       2. CD45neg only (MHCIIhi + MHCIIlo), colored by population
+#       1. All populations, colored by population
+#       2. CD45neg only (all non-reference conditions), colored by population
 #       3. CD45neg only, colored by Leiden cluster
+#
+# Combined/merged analyses group plates by biological strain_group (see
+# data/metadata.csv), not by literal plate — NOD-family plates (NOD, NOD2,
+# NOD3, ...) are shown together by default; a plate with distinct biology
+# (e.g. NODPDL1) keeps its own group.
 #
 # DESTRUCTIVE: Wipes results/05_dge/ before writing new outputs.
 # Upstream folders (01-04, qc_summary) are not touched.
@@ -61,6 +69,8 @@ MHCII_VST_MIN    <- 1.0    # minimum VST for both H2-Aa and H2-Ab
 MHCII_GENES      <- c("H2-Aa", "H2-Ab1")  # gene symbols to filter on
 
 # -- Self-copy into scripts/ for version control -------------------------------
+# (skipped when already running from scripts/per_strain_plots.R, since
+# file.copy() errors if source and destination are the same file)
 local({
   this_script <- normalizePath(
     grep("--file=", commandArgs(trailingOnly=FALSE), value=TRUE) |>
@@ -70,9 +80,11 @@ local({
   if (length(this_script) == 1 && nchar(this_script) > 0) {
     dest_dir <- file.path(base_dir, "scripts")
     dir.create(dest_dir, showWarnings=FALSE, recursive=TRUE)
-    dest <- file.path(dest_dir, "per_strain_plots.R")
-    if (file.copy(this_script, dest, overwrite=TRUE)) {
-      cat("Script copied to:", dest, "\n")
+    dest <- normalizePath(file.path(dest_dir, "per_strain_plots.R"), mustWork=FALSE)
+    if (this_script != dest) {
+      if (file.copy(this_script, dest, overwrite=TRUE)) {
+        cat("Script copied to:", dest, "\n")
+      }
     }
   }
 })
@@ -88,6 +100,17 @@ cat("Created fresh results/05_dge/\n\n")
 # -- Load data -----------------------------------------------------------------
 counts <- read.table(counts_f, header=TRUE, row.names=1, sep="\t",
                      check.names=FALSE)
+
+# featureCounts' output keeps 5 non-count annotation columns (Chr, Start, End,
+# Strand, Length) between Geneid (already moved to rownames above) and the
+# actual per-cell columns. Drop them here so every downstream numeric op
+# (colSums, sweep, DESeq2, etc.) sees a clean, fully-numeric cell x gene
+# matrix, and so cell counts match data/metadata.csv exactly.
+annot_cols <- c("Chr", "Start", "End", "Strand", "Length")
+counts <- counts[, !(colnames(counts) %in% annot_cols), drop=FALSE]
+counts <- as.matrix(counts)
+storage.mode(counts) <- "numeric"
+
 meta   <- read.csv(meta_f, stringsAsFactors=FALSE)
 rownames(meta) <- meta$cell_id
 cat("Total cells in count matrix:", ncol(counts), "\n")
@@ -280,40 +303,74 @@ run_mca_correlation <- function(expr_mat, cluster_vec_input, cluster_levels_inpu
 }
 
 # -- Shared settings -----------------------------------------------------------
-strains <- c("NOD", "B6G7", "B6MHCIIGFP", "NODPDL1")
-
-contrasts <- list(
-  list(
-    name   = "CD45pos_vs_MHCIIhi",
-    label  = "CD45+ MHCIIpos vs CD45- MHCIIhi",
-    con    = c("condition", "CD45neg_MHCIIhi", "CD45pos_MHCIIpos"),
-    groups = c("CD45pos_MHCIIpos", "CD45neg_MHCIIhi")
-  ),
-  list(
-    name   = "CD45pos_vs_MHCIIlo",
-    label  = "CD45+ MHCIIpos vs CD45- MHCIIlo",
-    con    = c("condition", "CD45neg_MHCIIlo", "CD45pos_MHCIIpos"),
-    groups = c("CD45pos_MHCIIpos", "CD45neg_MHCIIlo")
-  ),
-  list(
-    name   = "MHCIIhi_vs_MHCIIlo",
-    label  = "CD45- MHCIIhi vs CD45- MHCIIlo",
-    con    = c("condition", "CD45neg_MHCIIhi", "CD45neg_MHCIIlo"),
-    groups = c("CD45neg_MHCIIlo", "CD45neg_MHCIIhi")
-  )
-)
+# strains: one independent DESeq2/normalization analysis per plate (NOD, NOD2,
+#   NOD3, ... all run separately, own reference wells, own output folder).
+# strain_groups: biological grouping used for combined-analysis plots/colors.
+#   NOD-family plates (NOD, NOD2, NOD3, ...) collapse into one "NOD" group by
+#   default; a plate with genuinely distinct biology (e.g. NODPDL1) keeps its
+#   own group. Adding a new plate later is metadata-only — no code changes
+#   needed as long as data/metadata.csv has strain + strain_group set.
+strains       <- sort(unique(meta$strain))
+strain_groups <- sort(unique(meta$strain_group))
+REF_CONDITION <- "CD45pos_MHCIIpos"   # reference/normalization condition, all plates
 
 cond_colors <- c(
   "CD45+ MHCIIpos" = "#2166AC",
   "CD45- MHCIIhi"  = "#D6604D",
-  "CD45- MHCIIlo"  = "#4DAC26"
+  "CD45- MHCIIlo"  = "#4DAC26",
+  "CD45- MHCIIpos" = "#B15928"
 )
 
 clean_label <- function(x) {
   x <- gsub("CD45pos_MHCIIpos", "CD45+ MHCIIpos", x)
   x <- gsub("CD45neg_MHCIIhi",  "CD45- MHCIIhi",  x)
   x <- gsub("CD45neg_MHCIIlo",  "CD45- MHCIIlo",  x)
+  x <- gsub("CD45neg_MHCIIpos", "CD45- MHCIIpos", x)
   x
+}
+
+# Short filename-safe token for a condition (used to build contrast names like
+# "CD45pos_vs_MHCIIhi"). The reference condition always maps to "CD45pos";
+# every other condition keeps its "CD45neg_" suffix stripped, which stays
+# unique as long as non-reference conditions follow the CD45neg_* pattern.
+cond_token <- function(cond) {
+  ifelse(cond == REF_CONDITION, "CD45pos", sub("^CD45neg_", "", cond))
+}
+
+# Build the pairwise DESeq2 contrasts for whichever conditions are actually
+# present in a given strain's data: reference vs. each non-reference condition
+# (label shows reference first; numerator is always the non-reference side),
+# plus all pairwise comparisons among the non-reference conditions themselves
+# (labeled/contrasted in alphabetical order of the raw condition string). This
+# reproduces the original fixed 3-contrast design exactly for strains with
+# MHCIIhi/MHCIIlo, and collapses to a single contrast for plates with only one
+# non-reference condition (e.g. NODPDL1's CD45neg_MHCIIpos).
+build_contrasts <- function(conditions_present) {
+  conditions_present <- unique(as.character(conditions_present))
+  non_ref <- sort(setdiff(conditions_present, REF_CONDITION))
+  pairs <- list()
+  for (nr in non_ref) {
+    pairs[[length(pairs) + 1]] <- list(
+      label_a = REF_CONDITION, label_b = nr,
+      num = nr, denom = REF_CONDITION
+    )
+  }
+  if (length(non_ref) >= 2) {
+    for (cb in combn(non_ref, 2, simplify = FALSE)) {
+      pairs[[length(pairs) + 1]] <- list(
+        label_a = cb[1], label_b = cb[2],
+        num = cb[1], denom = cb[2]
+      )
+    }
+  }
+  lapply(pairs, function(p) {
+    list(
+      name   = paste0(cond_token(p$label_a), "_vs_", cond_token(p$label_b)),
+      label  = paste0(clean_label(p$label_a), " vs ", clean_label(p$label_b)),
+      con    = c("condition", p$num, p$denom),
+      groups = c(p$denom, p$num)
+    )
+  })
 }
 
 # -- UMAP helper: PCA -> select PCs by variance -> UMAP -----------------------
@@ -385,14 +442,18 @@ for (strain in strains) {
   cat("Counts per condition:\n")
   print(table(s_meta$condition))
 
+  # -- Contrasts for this strain (depends on which conditions are present) ----
+  strain_contrasts <- build_contrasts(unique(s_meta$condition))
+  cat("Contrasts for this strain:",
+      paste(sapply(strain_contrasts, function(x) x$name), collapse=" | "), "\n")
+
   # -- Filter low-count genes --------------------------------------------------
   keep     <- rowSums(s_counts) >= 10
   s_counts <- s_counts[keep, ]
   cat("Genes passing filter:", nrow(s_counts), "\n")
 
   # -- Build DESeq2 object -----------------------------------------------------
-  s_meta$condition <- relevel(factor(s_meta$condition),
-                               ref="CD45pos_MHCIIpos")
+  s_meta$condition <- relevel(factor(s_meta$condition), ref=REF_CONDITION)
 
   dds <- DESeqDataSetFromMatrix(
     countData = round(as.matrix(s_counts)),
@@ -400,8 +461,8 @@ for (strain in strains) {
     design    = ~ condition
   )
 
-  # -- Size factors from CD45pos_MHCIIpos (A1-A12) wells only -----------------
-  ref_cells <- s_meta$cell_id[s_meta$condition == "CD45pos_MHCIIpos"]
+  # -- Size factors from this strain's reference wells only --------------------
+  ref_cells <- s_meta$cell_id[s_meta$condition == REF_CONDITION]
   cat("Reference cells for size factor estimation:", length(ref_cells), "\n")
 
   ref_counts   <- as.matrix(s_counts[, ref_cells])
@@ -435,7 +496,9 @@ for (strain in strains) {
 
   # -- Expression matrix -------------------------------------------------------
   cat("Writing expression matrix...\n")
-  cond_levels <- c("CD45pos_MHCIIpos", "CD45neg_MHCIIhi", "CD45neg_MHCIIlo")
+  cond_levels <- c(REF_CONDITION,
+                   sort(setdiff(unique(as.character(s_meta$condition)),
+                                REF_CONDITION)))
   expr_mat <- data.frame(
     ensembl_id  = rownames(expr),
     gene_symbol = to_sym(rownames(expr)),
@@ -444,50 +507,40 @@ for (strain in strains) {
   for (cond in cond_levels) {
     cond_cells <- intersect(s_meta$cell_id[s_meta$condition == cond],
                             colnames(expr))
+    col_name <- paste0("mean_VST_", cond)
     if (length(cond_cells) == 0) {
-      expr_mat[[paste0("mean_VST_", cond)]] <- NA
+      expr_mat[[col_name]] <- NA
     } else if (length(cond_cells) == 1) {
-      expr_mat[[paste0("mean_VST_", cond)]] <- expr[, cond_cells]
+      expr_mat[[col_name]] <- expr[, cond_cells]
     } else {
-      expr_mat[[paste0("mean_VST_", cond)]] <- rowMeans(expr[, cond_cells])
+      expr_mat[[col_name]] <- rowMeans(expr[, cond_cells])
     }
   }
-  colnames(expr_mat) <- c(
-    "ensembl_id", "gene_symbol",
-    "mean_VST_CD45pos_MHCIIpos",
-    "mean_VST_CD45neg_MHCIIhi",
-    "mean_VST_CD45neg_MHCIIlo"
-  )
 
-  # Upregulation rankings
-  rank_res_hi <- as.data.frame(results(dds,
-    contrast=c("condition", "CD45neg_MHCIIhi", "CD45pos_MHCIIpos"),
-    alpha=0.05))
-  rank_res_hi$ensembl_id <- rownames(rank_res_hi)
-  rank_res_hi$score_hi   <- ifelse(
-    rank_res_hi$log2FoldChange > 0 & !is.na(rank_res_hi$padj) &
-      rank_res_hi$padj > 0,
-    rank_res_hi$log2FoldChange * -log10(rank_res_hi$padj), NA)
+  # Upregulation rankings: one rank column per non-reference condition,
+  # scored by log2FC x -log10(padj) vs the reference condition. Reproduces
+  # rank_upregulated_MHCIIhi / rank_upregulated_MHCIIlo for strains with that
+  # design, and generalizes to however many non-reference conditions a given
+  # plate actually has (e.g. a single rank_upregulated_MHCIIpos for NODPDL1).
+  non_ref_conditions <- setdiff(cond_levels, REF_CONDITION)
+  for (cond in non_ref_conditions) {
+    rank_res <- as.data.frame(results(dds,
+      contrast=c("condition", cond, REF_CONDITION), alpha=0.05))
+    rank_res$ensembl_id <- rownames(rank_res)
+    score_col <- paste0("score_", cond_token(cond))
+    rank_res[[score_col]] <- ifelse(
+      rank_res$log2FoldChange > 0 & !is.na(rank_res$padj) &
+        rank_res$padj > 0,
+      rank_res$log2FoldChange * -log10(rank_res$padj), NA)
 
-  rank_res_lo <- as.data.frame(results(dds,
-    contrast=c("condition", "CD45neg_MHCIIlo", "CD45pos_MHCIIpos"),
-    alpha=0.05))
-  rank_res_lo$ensembl_id <- rownames(rank_res_lo)
-  rank_res_lo$score_lo   <- ifelse(
-    rank_res_lo$log2FoldChange > 0 & !is.na(rank_res_lo$padj) &
-      rank_res_lo$padj > 0,
-    rank_res_lo$log2FoldChange * -log10(rank_res_lo$padj), NA)
-
-  expr_mat <- expr_mat %>%
-    left_join(rank_res_hi[, c("ensembl_id","score_hi")], by="ensembl_id") %>%
-    left_join(rank_res_lo[, c("ensembl_id","score_lo")], by="ensembl_id") %>%
-    mutate(
-      rank_upregulated_MHCIIhi = ifelse(!is.na(score_hi),
-        rank(-score_hi, ties.method="min", na.last="keep"), NA),
-      rank_upregulated_MHCIIlo = ifelse(!is.na(score_lo),
-        rank(-score_lo, ties.method="min", na.last="keep"), NA)
-    ) %>%
-    select(-score_hi, -score_lo)
+    expr_mat <- expr_mat %>%
+      left_join(rank_res[, c("ensembl_id", score_col)], by="ensembl_id")
+    rank_col <- paste0("rank_upregulated_", cond_token(cond))
+    expr_mat[[rank_col]] <- ifelse(
+      !is.na(expr_mat[[score_col]]),
+      rank(-expr_mat[[score_col]], ties.method="min", na.last="keep"), NA)
+    expr_mat[[score_col]] <- NULL
+  }
 
   expr_mat <- expr_mat[order(expr_mat$ensembl_id), ]
   expr_path <- file.path(out_dir, paste0("expression_matrix_", strain, ".csv"))
@@ -539,9 +592,10 @@ for (strain in strains) {
   ggsave(umap1_path, p_umap_all, width=6, height=6)
   cat("  Saved:", umap1_path, "\n")
 
-  # -- UMAP 2 & 3: CD45neg only (MHCIIhi + MHCIIlo) ---------------------------
-  cd45neg_cells <- s_meta$cell_id[s_meta$condition %in%
-                                    c("CD45neg_MHCIIhi", "CD45neg_MHCIIlo")]
+  # -- UMAP 2 & 3: CD45neg only (all non-reference conditions) ----------------
+  cd45neg_conditions <- setdiff(unique(as.character(s_meta$condition)),
+                                REF_CONDITION)
+  cd45neg_cells <- s_meta$cell_id[s_meta$condition %in% cd45neg_conditions]
   cd45neg_cells <- intersect(cd45neg_cells, colnames(expr_hvg))
   expr_cd45neg  <- expr_hvg[, cd45neg_cells]
   cat("  Running UMAP (CD45neg cells, n=", ncol(expr_cd45neg), ")...\n",
@@ -563,7 +617,9 @@ for (strain in strains) {
     scale_color_manual(values=cond_colors[names(cond_colors) != "CD45+ MHCIIpos"]) +
     labs(
       title    = paste0(strain, " — CD45\u2212 populations by population"),
-      subtitle = paste0("n=", nrow(umap_neg_df), " cells | MHCIIhi + MHCIIlo only"),
+      subtitle = paste0("n=", nrow(umap_neg_df), " cells | ",
+                        paste(sapply(cd45neg_conditions, cond_token), collapse=" + "),
+                        " only"),
       color    = "Population"
     ) +
     theme_bw(base_size=12) +
@@ -713,7 +769,7 @@ for (strain in strains) {
   )
 
   # -- Per-contrast plots (volcano + violin) -----------------------------------
-  for (ct in contrasts) {
+  for (ct in strain_contrasts) {
 
     cat("\n  --", ct$label, "--\n")
 
@@ -825,7 +881,9 @@ for (strain in strains) {
     vln_panel <- wrap_plots(gene_plots, nrow=4, ncol=5) +
       plot_annotation(
         title    = paste0(strain, " — Top 20 DEGs — ", ct$label),
-        subtitle = "VST-normalized | Top 10 up + Top 10 down by padj | Normalized to CD45+ MHCIIpos (A1-A12)",
+        subtitle = paste0("VST-normalized | Top 10 up + Top 10 down by padj | ",
+                          "Normalized to ", length(ref_cells),
+                          " CD45+ MHCIIpos reference wells"),
         theme    = theme(
           plot.title=element_text(face="bold", size=13),
           plot.subtitle=element_text(size=9, color="grey40")
@@ -854,16 +912,20 @@ cat("Genes common across all plates:", length(common_genes), "\n")
 
 combined_expr <- do.call(cbind, lapply(all_expr_list, function(e) e[common_genes, ]))
 combined_meta <- do.call(rbind, all_meta_list)
-combined_meta$condition <- as.character(combined_meta$condition)
-combined_meta$strain    <- as.character(combined_meta$strain)
+combined_meta$condition    <- as.character(combined_meta$condition)
+combined_meta$strain       <- as.character(combined_meta$strain)
+combined_meta$strain_group <- as.character(combined_meta$strain_group)
 rownames(combined_meta) <- combined_meta$cell_id
 combined_meta <- combined_meta[colnames(combined_expr), , drop=FALSE]
 cat("Total cells in combined matrix:", ncol(combined_expr), "\n")
 cat("Metadata rows matched:", sum(!is.na(combined_meta$strain)), "\n")
 
-# Add strain_condition label for the 12-color UMAP
+# Add strain_condition label for the 12-color UMAP. Uses strain_group (not the
+# literal per-plate strain) so NOD-family plates (NOD, NOD2, NOD3, ...) group
+# together visually by default; plates with distinct biology (e.g. NODPDL1)
+# keep their own group.
 combined_meta$strain_condition <- paste0(
-  combined_meta$strain, " ",
+  combined_meta$strain_group, " ",
   clean_label(combined_meta$condition)
 )
 cat("strain_condition sample:\n"); print(head(combined_meta$strain_condition))
@@ -888,7 +950,8 @@ umap_comb_df <- data.frame(
 )
 umap_comb_df <- umap_comb_df %>%
   left_join(
-    combined_meta[, c("cell_id", "strain", "condition", "strain_condition")],
+    combined_meta[, c("cell_id", "strain", "strain_group", "condition",
+                      "strain_condition")],
     by = "cell_id"
   )
 
@@ -943,24 +1006,25 @@ comb1_path <- file.path(combined_out, "umap_all372_by_cluster.pdf")
 ggsave(comb1_path, p_comb_clust, width=7, height=6)
 cat("Saved:", comb1_path, "\n")
 
-# -- Combined UMAP 2: colored by strain x condition (12 colors) ----------------
-# Build 12-color palette: 4 strains x 3 conditions
-strain_list <- c("NOD", "B6G7", "B6MHCIIGFP", "NODPDL1")
-cond_list   <- c("CD45+ MHCIIpos", "CD45- MHCIIhi", "CD45- MHCIIlo")
+# -- Combined UMAP 2: colored by strain_group x condition -----------------------
+# Build a dynamic palette sized to however many strain groups / conditions are
+# actually present (instead of a fixed dictionary). NOD-family plates share one
+# base hue since strain_group collapses them; each condition gets a lighter
+# shade of that hue, darkest/most-saturated for the reference condition.
+cond_list <- sort(unique(clean_label(combined_meta$condition)))
 
-# Base hues per strain, lighter/darker shades per condition
-strain_base_colors <- c(
-  NOD        = "#2166AC",
-  B6G7       = "#D6604D",
-  B6MHCIIGFP = "#4DAC26",
-  NODPDL1    = "#8B44AC"
-)
-# Condition modifiers: MHCIIpos = full saturation, MHCIIhi = lighter,
-# MHCIIlo = darker
-condition_alpha <- c(
-  "CD45+ MHCIIpos" = 1.0,
-  "CD45- MHCIIhi"  = 0.55,
-  "CD45- MHCIIlo"  = 0.30
+make_group_palette <- function(groups) {
+  groups <- sort(unique(groups))
+  setNames(scales::hue_pal()(length(groups)), groups)
+}
+strain_base_colors <- make_group_palette(strain_groups)
+
+ref_label       <- clean_label(REF_CONDITION)
+non_ref_labels  <- sort(setdiff(cond_list, ref_label))
+ordered_conds   <- c(ref_label, non_ref_labels)
+condition_alpha <- setNames(
+  seq(1.0, 0.30, length.out = length(ordered_conds)),
+  ordered_conds
 )
 
 # Build palette by blending base color toward white (lighter) or black (darker)
@@ -973,7 +1037,7 @@ blend_color <- function(hex, alpha_toward_white) {
 }
 
 sc_palette <- c()
-for (st in strain_list) {
+for (st in strain_groups) {
   for (co in cond_list) {
     key            <- paste0(st, " ", co)
     sc_palette[key] <- blend_color(strain_base_colors[st],
@@ -981,33 +1045,17 @@ for (st in strain_list) {
   }
 }
 
-# Rebuild sc_palette with fully distinct colors per strain x condition
-# Each strain gets 3 visually distinct shades (light, mid, dark)
-sc_palette_v2 <- c(
-  "NOD CD45+ MHCIIpos" = "#08519C",   # dark blue
-  "NOD CD45- MHCIIhi"  = "#6BAED6",   # mid blue
-  "NOD CD45- MHCIIlo"  = "#BDD7E7",   # light blue
-  "B6G7 CD45+ MHCIIpos" = "#A50F15",  # dark red
-  "B6G7 CD45- MHCIIhi"  = "#FB6A4A",  # mid red
-  "B6G7 CD45- MHCIIlo"  = "#FCBBA1",  # light red/salmon
-  "B6MHCIIGFP CD45+ MHCIIpos" = "#006D2C",  # dark green
-  "B6MHCIIGFP CD45- MHCIIhi"  = "#41AB5D",  # mid green
-  "B6MHCIIGFP CD45- MHCIIlo"  = "#C7E9C0",  # light green
-  "NODPDL1 CD45+ MHCIIpos" = "#54278F",  # dark purple
-  "NODPDL1 CD45- MHCIIhi"  = "#9E9AC8",  # mid purple
-  "NODPDL1 CD45- MHCIIlo"  = "#DADAEB"   # light purple
-)
-
 p_comb_strain <- ggplot(umap_comb_df,
                          aes(x=UMAP1, y=UMAP2, color=strain_condition)) +
   geom_point(size=1.0, alpha=1.0, stroke=0.2, shape=21,
              aes(fill=strain_condition), color="grey20") +
-  scale_fill_manual(values=sc_palette_v2) +
-  scale_color_manual(values=sc_palette_v2, guide="none") +
+  scale_fill_manual(values=sc_palette) +
+  scale_color_manual(values=sc_palette, guide="none") +
   labs(
     title    = paste0("All strains — ", nrow(umap_comb_df), " cells by strain & population"),
     subtitle = paste0("n=", nrow(umap_comb_df),
-                      " (MHCII-filtered) | 4 strains x 3 conditions"),
+                      " (MHCII-filtered) | ", length(strain_groups),
+                      " strain group(s) x ", length(cond_list), " condition(s)"),
     fill     = "Strain / Population"
   ) +
   guides(fill=guide_legend(ncol=2, override.aes=list(size=3, stroke=0.3))) +
@@ -1024,12 +1072,14 @@ comb2_path <- file.path(combined_out, "umap_all372_by_strain_population.pdf")
 ggsave(comb2_path, p_comb_strain, width=8, height=6)
 cat("Saved:", comb2_path, "\n")
 
-# -- 4-panel UMAP: each strain on comprehensive coordinates -------------------
-cat("Generating per-strain panels on comprehensive UMAP coordinates...\n")
+# -- Per-group panel UMAP: each strain_group on comprehensive coordinates -----
+# Grouped by default (NOD + NOD2 + ... share one panel); pass strains instead
+# of strain_groups here if you specifically want one panel per individual plate.
+cat("Generating per-strain-group panels on comprehensive UMAP coordinates...\n")
 
-strain_panel_plots <- lapply(strains, function(st) {
-  # Cells belonging to this strain
-  st_cells    <- umap_comb_df$cell_id[umap_comb_df$strain == st]
+strain_panel_plots <- lapply(strain_groups, function(st) {
+  # Cells belonging to this strain group
+  st_cells    <- umap_comb_df$cell_id[umap_comb_df$strain_group == st]
   df_fg       <- umap_comb_df %>% filter(cell_id %in% st_cells)
   df_bg       <- umap_comb_df %>% filter(!cell_id %in% st_cells)
 
@@ -1056,12 +1106,12 @@ strain_panel_plots <- lapply(strains, function(st) {
     )
 })
 
-# Stack 4 panels vertically
+# Stack panels vertically (one per strain group)
 strain_panels_combined <- wrap_plots(strain_panel_plots, ncol=1) +
   plot_annotation(
-    title    = "Per-strain cells on comprehensive UMAP",
+    title    = "Per-strain-group cells on comprehensive UMAP",
     subtitle = paste0("Comprehensive Leiden clusters (resolution=",
-                      LEIDEN_RESOLUTION, ") | grey = other strains"),
+                      LEIDEN_RESOLUTION, ") | grey = other strain groups"),
     theme    = theme(
       plot.title    = element_text(face="bold", size=13),
       plot.subtitle = element_text(size=9, color="grey40")
@@ -1071,7 +1121,7 @@ strain_panels_combined <- wrap_plots(strain_panel_plots, ncol=1) +
 strain_panels_path <- file.path(combined_out,
                                  "umap_per_strain_on_comprehensive.pdf")
 ggsave(strain_panels_path, strain_panels_combined,
-       width=7, height=6 * length(strains))
+       width=7, height=6 * length(strain_groups))
 cat("Saved:", strain_panels_path, "\n")
 
 cat("\nCombined UMAPs complete.\n")
@@ -1105,18 +1155,16 @@ suppressPackageStartupMessages({
 
 # Attach clean labels to plotting df
 umap_comb_df$condition_clean  <- clean_label(umap_comb_df$condition)
-umap_comb_df$strain_condition <- paste0(umap_comb_df$strain, " ",
+umap_comb_df$strain_condition <- paste0(umap_comb_df$strain_group, " ",
                                          umap_comb_df$condition_clean)
 umap_comb_df$cluster          <- factor(umap_comb_df$cluster,
                                          levels=sort(unique(as.integer(
                                            umap_comb_df$cluster))))
 
-strain_colors <- c(
-  NOD        = "#2166AC",
-  B6G7       = "#D6604D",
-  B6MHCIIGFP = "#4DAC26",
-  NODPDL1    = "#8B44AC"
-)
+# Reuse the same base hue per strain_group computed for the UMAP palette above,
+# so the "strain only" bars and the strain x population UMAP/bars stay
+# visually consistent.
+strain_colors <- strain_base_colors
 
 MIN_LABEL_PROP <- 0.05   # only label segments >= 5% of bar
 
@@ -1171,9 +1219,9 @@ p_bar_sc_prop <- ggplot(lab2, aes(x=cluster, y=prop, fill=strain_condition)) +
         legend.text=element_text(size=7),
         legend.key.size=unit(0.4,"cm"))
 
-# -- Bar chart 3: counts, fill = strain only -----------------------------------
-lab3 <- make_label_df(umap_comb_df, "strain", "count")
-p_bar_s_counts <- ggplot(lab3, aes(x=cluster, y=n, fill=strain)) +
+# -- Bar chart 3: counts, fill = strain group only -----------------------------
+lab3 <- make_label_df(umap_comb_df, "strain_group", "count")
+p_bar_s_counts <- ggplot(lab3, aes(x=cluster, y=n, fill=strain_group)) +
   geom_bar(stat="identity", position="stack", color="white", linewidth=0.15) +
   geom_text(aes(y=y_pos, label=label_count),
             size=2.5, color="white", fontface="bold") +
@@ -1183,9 +1231,9 @@ p_bar_s_counts <- ggplot(lab3, aes(x=cluster, y=n, fill=strain)) +
   theme(plot.title=element_text(face="bold", size=10),
         panel.grid.minor=element_blank())
 
-# -- Bar chart 4: proportions, fill = strain only ------------------------------
-lab4 <- make_label_df(umap_comb_df, "strain", "prop")
-p_bar_s_prop <- ggplot(lab4, aes(x=cluster, y=prop, fill=strain)) +
+# -- Bar chart 4: proportions, fill = strain group only ------------------------
+lab4 <- make_label_df(umap_comb_df, "strain_group", "prop")
+p_bar_s_prop <- ggplot(lab4, aes(x=cluster, y=prop, fill=strain_group)) +
   geom_bar(stat="identity", position="stack", color="white", linewidth=0.15) +
   geom_text(aes(y=y_pos, label=label_prop),
             size=2.5, color="white", fontface="bold") +
@@ -1965,7 +2013,7 @@ cat("Saved:", vln_path, "\n")
 cat("\n==============================================================\n")
 cat("All outputs complete. Output structure:\n")
 for (st in strains) {
-  cat(" results/05_dge/", st, "_plots/  (10 files)\n", sep="")
+  cat(" results/05_dge/", st, "_plots/  (file count varies with # of contrasts)\n", sep="")
 }
 cat(" results/05_dge/combined_plots/\n")
 cat("   - umap_all372_by_cluster.pdf\n")
@@ -2101,9 +2149,10 @@ if (!file.exists(vaf_counts_f2)) {
 
   # -- Build metadata for Clarke cells -----------------------------------------
   meta_clarke <- data.frame(
-    cell_id   = clarke_cell_ids,
-    strain    = "Clarke2025",
-    condition = clarke_condition,
+    cell_id      = clarke_cell_ids,
+    strain       = "Clarke2025",
+    strain_group = "Clarke2025",
+    condition    = clarke_condition,
     strain_condition = paste0("Clarke2025 ",
       ifelse(clarke_cd45pos, "CD45pos",
       ifelse(clarke_cell_ids %in% vaf_ids_c, "VAF", "VRC"))),
@@ -2121,8 +2170,8 @@ if (!file.exists(vaf_counts_f2)) {
       ncol(merged_expr_raw), "cells\n")
 
   # -- Build merged metadata BEFORE batch correction (needed as covariate) ---
-  your_meta_sub <- combined_meta[, c("cell_id","strain","condition",
-                                      "strain_condition")]
+  your_meta_sub <- combined_meta[, c("cell_id","strain","strain_group",
+                                      "condition","strain_condition")]
   meta_merged <- rbind(your_meta_sub, meta_clarke[, colnames(your_meta_sub)])
   rownames(meta_merged) <- meta_merged$cell_id
   cat("Merged metadata:", nrow(meta_merged), "rows\n")
@@ -2139,7 +2188,7 @@ if (!file.exists(vaf_counts_f2)) {
   }
   suppressPackageStartupMessages(library(limma))
 
-  # Batch vector: "yours" for your 4 strains, "clarke" for Clarke2025
+  # Batch vector: "yours" for your own strains, "clarke" for Clarke2025
   all_cells_merged <- colnames(merged_expr_raw)
   batch_vec        <- ifelse(all_cells_merged %in% colnames(combined_expr),
                               "yours", "clarke")
@@ -2163,17 +2212,14 @@ if (!file.exists(vaf_counts_f2)) {
   # (meta_merged already built above before batch correction)
 
   # -- Color palettes for merged analysis --------------------------------------
-  # Clarke2025 gets grey/brown tones to distinguish from your strains
-  strain_colors_merged <- c(
-    NOD         = "#2166AC",
-    B6G7        = "#D6604D",
-    B6MHCIIGFP  = "#4DAC26",
-    NODPDL1     = "#8B44AC",
-    Clarke2025  = "#8B6914"
-  )
+  # Reuse the same dynamic per-group base colors from the combined section
+  # (strain_base_colors), plus a fixed tone for Clarke2025 to keep it visually
+  # distinct from your own strain groups.
+  strain_groups_merged <- c(strain_groups, "Clarke2025")
+  strain_colors_merged <- c(strain_base_colors, Clarke2025 = "#8B6914")
 
   sc_palette_merged <- c(
-    sc_palette_v2,
+    sc_palette,
     "Clarke2025 CD45pos" = "#C49A2A",
     "Clarke2025 VAF"     = "#6B4F10",
     "Clarke2025 VRC"     = "#D4A843"
@@ -2192,7 +2238,8 @@ if (!file.exists(vaf_counts_f2)) {
   umap_m_df <- data.frame(umap_merged,
                             cell_id = rownames(umap_merged),
                             stringsAsFactors=FALSE) %>%
-    left_join(meta_merged[, c("cell_id","strain","condition","strain_condition")],
+    left_join(meta_merged[, c("cell_id","strain","strain_group","condition",
+                              "strain_condition")],
               by="cell_id")
 
   # All-gene PCA for Leiden on merged
@@ -2249,7 +2296,7 @@ if (!file.exists(vaf_counts_f2)) {
     labs(
       title    = paste0("Your cells + Clarke 2025 — ",
                         nrow(umap_m_df), " cells by strain & population"),
-      subtitle = "5 strains x conditions",
+      subtitle = paste0(length(strain_groups_merged), " strain groups x conditions"),
       fill     = "Strain / Population"
     ) +
     guides(fill=guide_legend(ncol=2, override.aes=list(size=3, stroke=0.3))) +
@@ -2263,10 +2310,10 @@ if (!file.exists(vaf_counts_f2)) {
          p_m_strain, width=8, height=6)
   cat("Saved: umap_merged_by_strain_population.pdf\n")
 
-  # -- Per-strain panels on merged UMAP ----------------------------------------
-  all_strains_merged <- c(strains, "Clarke2025")
+  # -- Per-strain-group panels on merged UMAP ----------------------------------
+  all_strains_merged <- strain_groups_merged
   strain_panels_m <- lapply(all_strains_merged, function(st) {
-    st_cells <- umap_m_df$cell_id[umap_m_df$strain == st]
+    st_cells <- umap_m_df$cell_id[umap_m_df$strain_group == st]
     df_fg    <- umap_m_df %>% filter(cell_id %in% st_cells)
     df_bg    <- umap_m_df %>% filter(!cell_id %in% st_cells)
     ggplot() +
@@ -2285,9 +2332,9 @@ if (!file.exists(vaf_counts_f2)) {
   })
   panels_m_combined <- wrap_plots(strain_panels_m, ncol=1) +
     plot_annotation(
-      title    = "Per-strain cells on merged UMAP (your cells + Clarke 2025)",
+      title    = "Per-strain-group cells on merged UMAP (your cells + Clarke 2025)",
       subtitle = paste0("Merged Leiden clusters | resolution=", LEIDEN_RESOLUTION,
-                        " | grey = other strains"),
+                        " | grey = other strain groups"),
       theme    = theme(plot.title=element_text(face="bold", size=13),
                        plot.subtitle=element_text(size=9, color="grey40"))
     )
@@ -2300,7 +2347,7 @@ if (!file.exists(vaf_counts_f2)) {
   cat("Generating merged cluster bar charts...\n")
   umap_m_df$condition_clean  <- clean_label(umap_m_df$condition)
   umap_m_df$condition_clean  <- ifelse(
-    umap_m_df$strain == "Clarke2025",
+    umap_m_df$strain_group == "Clarke2025",
     umap_m_df$strain_condition,
     umap_m_df$condition_clean)
 
@@ -2320,8 +2367,8 @@ if (!file.exists(vaf_counts_f2)) {
 
   lab_sc_c <- make_label_df_m(umap_m_df, "strain_condition", "count")
   lab_sc_p <- make_label_df_m(umap_m_df, "strain_condition", "prop")
-  lab_s_c  <- make_label_df_m(umap_m_df, "strain",           "count")
-  lab_s_p  <- make_label_df_m(umap_m_df, "strain",           "prop")
+  lab_s_c  <- make_label_df_m(umap_m_df, "strain_group",     "count")
+  lab_s_p  <- make_label_df_m(umap_m_df, "strain_group",     "prop")
 
   mk_bar <- function(lab, fill_var, pal, y_var, y_lab, title_str, prop=FALSE) {
     # Use pre-computed label column based on prop flag
@@ -2347,9 +2394,9 @@ if (!file.exists(vaf_counts_f2)) {
   p_b2 <- mk_bar(lab_sc_p, "strain_condition", sc_palette_merged,
                   "prop", "Proportion",       "Strain & population — proportions",
                   prop=TRUE)
-  p_b3 <- mk_bar(lab_s_c,  "strain",           strain_colors_merged,
+  p_b3 <- mk_bar(lab_s_c,  "strain_group",     strain_colors_merged,
                   "n",    "Cell count",       "Strain — counts")
-  p_b4 <- mk_bar(lab_s_p,  "strain",           strain_colors_merged,
+  p_b4 <- mk_bar(lab_s_p,  "strain_group",     strain_colors_merged,
                   "prop", "Proportion",       "Strain — proportions", prop=TRUE)
 
   bar_m <- (p_b1 | p_b2) / (p_b3 | p_b4) +
@@ -2657,7 +2704,7 @@ if (!file.exists(vaf_counts_f2)) {
 cat("\n==============================================================\n")
 cat("All outputs complete. Output structure:\n")
 for (st in strains) {
-  cat(" results/05_dge/", st, "_plots/  (10 files)\n", sep="")
+  cat(" results/05_dge/", st, "_plots/  (file count varies with # of contrasts)\n", sep="")
 }
 cat(" results/05_dge/combined_plots/\n")
 cat("   - umap_all372_by_cluster.pdf\n")
