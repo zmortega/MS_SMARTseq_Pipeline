@@ -25,11 +25,12 @@ FASTQ (R1/R2 per cell)
     │
     ▼
 [5] per_strain_plots.R
+        ├── Metadata/count-matrix alignment (meta reordered to colnames(counts))
         ├── MHCII expression filter (H2-Aa & H2-Ab1, applied globally)
         ├── Per-strain DESeq2 (independent per plate, normalized to that plate's own reference wells)
         │       ├── Volcano + violin plots (1 pair per contrast — contrasts built dynamically
         │       │     from whichever conditions are present, e.g. 3 for MHCIIhi/lo plates, 1 for NODPDL1)
-        │       ├── Expression matrix CSV (mean VST + upregulation rankings, one rank column per contrast)
+        │       ├── Expression matrix CSV (mean VST + detection stats + upregulation rankings)
         │       ├── Per-strain UMAP (by cluster + by population)
         │       └── Cell identity Excel (CellMarker 2.0 gene set scoring)
         ├── Combined analysis (all MHCII-filtered cells, grouped by strain_group)
@@ -68,9 +69,26 @@ hisat2-build -p 8 reference/GRCm39.primary_assembly.genome.fa reference/hisat2_i
 ### 3. Prepare your metadata
 
 Edit `data/metadata.csv` — one row per cell with columns:
-`cell_id`, `strain`, `condition`, `batch`
+`cell_id`, `strain`, `well`, `condition`, `batch`, `strain_group`
+
+`cell_id` must exactly match the FASTQ stem (everything before `_R1_001.fastq.gz`).
 
 See `data/metadata_example.csv` for format reference.
+
+**Plate layouts currently in `data/metadata.csv`** (564 cells):
+
+| Plate (`strain`) | `strain_group` | `batch` | Layout |
+|---|---|---|---|
+| B6G7 | B6G7 | batch1 | A1–A12 CD45+ MHCII+ · rest split MHCIIhi/MHCIIlo (42/42) |
+| B6MHCIIGFP | B6MHCIIGFP | batch1 | A1–A12 CD45+ MHCII+ · 30 MHCIIhi / 42 MHCIIlo (84 cells) |
+| NOD | NOD | batch2 | A1–A12 CD45+ MHCII+ · 42 MHCIIhi / 42 MHCIIlo |
+| NOD2 | NOD | batch2 | A1–A12 CD45+ MHCII+ · 42 MHCIIhi / 42 MHCIIlo |
+| NODPDL1 | NODPDL1 | batch3 | A1–B6 CD45+ MHCII+ (18) · B7–H12 CD45− MHCII+ (78) |
+| NODCD31 | NODCD31 | batch4 | A1–B6 CD45− MHCII+ **CD31−** (18) · B7–H12 CD45− MHCII+ **CD31+** (78) |
+
+NODCD31 has **no CD45+ MHCII+ wells** — it reuses NODPDL1's 18/78 well split but
+puts CD31− where the reference block normally sits. See *Per-strain
+normalization* below for how that plate is baselined.
 
 ### 4. Configure
 
@@ -83,6 +101,34 @@ Edit `config.yaml`:
 ```bash
 python pipeline.py --config config.yaml
 ```
+
+> **`--resume` is safe for `qc`/`trim`/`align`, but NOT for `count`.**
+> Those three steps write a `.done` flag per cell, so `--resume` correctly
+> reprocesses only new cells. The `count` step writes a *single* global flag at
+> `results/04_counts/all_cells/.done` that records only *that* counting
+> happened, never *which* cells were counted. Adding a plate and re-running with
+> `--resume` therefore skips featureCounts entirely and leaves you with a stale
+> `counts_clean.txt` — the new cells align fine, then silently never reach the
+> count matrix or any downstream plot.
+>
+> When adding a plate, clear the flag first:
+>
+> ```bash
+> rm -rf results/04_counts/all_cells
+> python pipeline.py --config config.yaml --steps count
+> ```
+>
+> Then verify the column count before going further — should be
+> `1 + 5 annotation + n_cells`:
+>
+> ```bash
+> head -2 results/04_counts/counts_clean.txt | tail -1 | awk '{print NF}'
+> ```
+
+> **Do not pass `--cells` to the `count` step.** `step_featurecounts()` builds
+> its BAM list from whatever cell list it is handed and then overwrites
+> `counts_clean.txt`. Restricting to a new plate rebuilds the matrix containing
+> *only* that plate and discards every other cell.
 
 ### 6. Run all DGE, UMAP, and downstream analyses
 
@@ -147,6 +193,7 @@ results/
 │   ├── B6G7_plots/                           (same layout, 3 contrasts)
 │   ├── B6MHCIIGFP_plots/                     (same layout, 3 contrasts)
 │   ├── NODPDL1_plots/                        (same layout, 1 contrast — single CD45neg_MHCIIpos condition)
+│   ├── NODCD31_plots/                        (same layout, 1 contrast — CD31+ vs CD31−, baselined on CD31−)
 │   ├── combined_plots/
 │   │   ├── umap_all_by_cluster.pdf
 │   │   ├── umap_all_by_strain_population.pdf
@@ -179,6 +226,28 @@ results/
 
 ## per_strain_plots.R — detailed documentation
 
+### Metadata / count matrix alignment
+
+`featureCounts` orders its columns by the BAM order it was handed
+(`B6G7_A10, B6G7_A11, B6G7_A12, B6G7_A1, ...`), which is **not** the row order of
+`data/metadata.csv` (`B6G7_A1, B6G7_A10, ...`). Any logical mask computed from the
+count columns — the MHCII filter, in particular — was previously applied
+positionally to `meta`, which silently paired the wrong metadata row with each
+cell and dropped cells that had actually passed.
+
+Immediately after load, `meta` is now reordered to `colnames(counts)` and asserted:
+
+```r
+meta <- meta[colnames(counts), , drop=FALSE]
+stopifnot(identical(rownames(meta), colnames(counts)),
+          identical(meta$cell_id,   colnames(counts)))
+```
+
+The MHCII mask is named by `cell_id`, and both `counts` and `meta` are subset by
+**cell_id character vector**, never by the logical mask, so they cannot
+desynchronize downstream. A cell present in `counts` with no metadata row is a
+hard error; metadata rows with no count column are reported and dropped.
+
 ### MHCII expression filter
 
 Applied globally before any analysis. A cell is retained only if both **H2-Aa**
@@ -193,8 +262,20 @@ MHCII_GENES   <- c("H2-Aa", "H2-Ab1")
 ### Per-strain normalization
 
 Each plate is treated as a fully independent experiment. Size factors are
-estimated using only the **CD45pos_MHCIIpos (A1-A12) wells** of each plate.
-No cross-plate pooling occurs.
+estimated using only that plate's own **reference wells** — normally the
+**CD45pos_MHCIIpos (A1-A12) wells**. No cross-plate pooling occurs.
+
+A plate is not required to sort CD45+ wells. `REF_CONDITION_OVERRIDES` in
+`scripts/per_strain_plots.R` sets a per-plate baseline; **NODCD31** is entirely
+CD45− MHCII+ (no CD45+ wells at all) and is normalized on its own **CD31−
+(A1–B6)** wells instead.
+
+Because of this, "is the reference condition" and "is a CD45+ cell" are no
+longer the same test. Normalization and DESeq2 baselining go through
+`ref_condition_for(strain)`; the biological CD45 gate (which cells appear in the
+CD45− UMAPs and the merged cluster-distribution tab) goes through
+`is_cd45neg()`, which reads the condition name. Using the former for the latter
+silently drops NODCD31's 18 CD31− cells.
 
 ### Per-strain DESeq2
 
@@ -203,19 +284,58 @@ Design: `~ condition`. VST via `varianceStabilizingTransformation()`.
 ### Per-strain contrasts
 
 Contrasts are no longer hardcoded — `build_contrasts()` generates them per plate from
-whichever `condition` values are actually present in `data/metadata.csv`: the reference
-condition (`CD45pos_MHCIIpos`) vs. each non-reference condition, plus all pairwise
-comparisons among the non-reference conditions. This reproduces the original fixed
-3-contrast design for NOD/NOD2/B6G7/B6MHCIIGFP and collapses to a single contrast for
-NODPDL1 (only one non-reference condition, `CD45neg_MHCIIpos`):
+whichever `condition` values are actually present in `data/metadata.csv`: that plate's
+reference condition vs. each non-reference condition, plus all pairwise comparisons
+among the non-reference conditions. This reproduces the original fixed 3-contrast
+design for NOD/NOD2/B6G7/B6MHCIIGFP and collapses to a single contrast for plates with
+one non-reference population:
 
-| Plate(s) | Contrasts |
-|---|---|
-| NOD, NOD2, B6G7, B6MHCIIGFP | CD45+ MHCIIpos vs CD45− MHCIIhi · CD45+ MHCIIpos vs CD45− MHCIIlo · CD45− MHCIIhi vs CD45− MHCIIlo |
-| NODPDL1 | CD45+ MHCIIpos vs CD45− MHCIIpos |
+| Plate(s) | Reference | Contrasts |
+|---|---|---|
+| NOD, NOD2, B6G7, B6MHCIIGFP | CD45pos_MHCIIpos | CD45+ MHCIIpos vs CD45− MHCIIhi · CD45+ MHCIIpos vs CD45− MHCIIlo · CD45− MHCIIhi vs CD45− MHCIIlo |
+| NODPDL1 | CD45pos_MHCIIpos | CD45+ MHCIIpos vs CD45− MHCIIpos |
+| NODCD31 | CD45neg_MHCIIpos_CD31neg | CD45− MHCIIpos CD31− vs CD45− MHCIIpos CD31+ |
+
+`build_contrasts()` now hard-errors if a plate's configured reference condition is
+absent from its metadata, rather than silently producing zero contrasts.
 
 Each contrast gets one volcano PDF and one violin PDF (top 10 up + top 10 down DEGs,
 gene symbols, jittered VST points).
+
+### Combined gene set — adding a plate shrinks it
+
+`common_genes <- Reduce(intersect, ...)` keeps only genes that survive **every**
+plate's `rowSums >= 10` filter, so a gene genuinely absent from one plate leaves the
+combined matrix for all plates. Adding NODCD31 took the intersection from
+**12,755 → 12,055 genes (−700, 5.5%)**.
+
+This is not cosmetic. The combined UMAP picks HVGs from that intersection, so the
+gene set change reshuffles Leiden clustering for *every* plate — **cluster numbering
+is not comparable across runs where the plate roster changed.** Snapshot
+`results/05_dge/` before re-running if you need old cluster IDs (see
+`results/05_dge_pre_fix/` for the pre-alignment-fix state).
+
+The most visible casualty is `Ptprc` (CD45): it has **exactly 0 counts across all 96
+NODCD31 cells**, because that plate is a pure CD45− sort with no CD45+ reference
+block. That is the sort working correctly, not a QC failure.
+
+Consequences for the two violin panels, which both plot the hardcoded `VIOLIN_GENES`:
+
+| Panel | Behavior |
+|---|---|
+| `combined_plots/violin_plots_by_cluster.pdf` | Sources each gene from the **per-plate** VST matrices (`all_expr_list`), not from `combined_expr`. Ptprc plots from the 5 plates that retain it, and the panel subtitle names the plates where it is absent. |
+| `CombinedwithVAFPaperPlots/violin_plots_by_cluster.pdf` | **Skipped for genes missing from `merged_expr`, with the reason logged.** Cannot use the per-plate fallback: `merged_expr` is `limma::removeBatchEffect`-corrected across your cells + Clarke, so an uncorrected per-plate value would put two scales on one axis. |
+
+Both panels previously crashed outright (`pivot_longer(): cols must select at least
+one column`) when a gene resolved to nothing. Both now fail soft.
+
+> If the merged Ptprc violin matters for a figure, the only way to recover it is to
+> exclude NODCD31 from the combined analysis, which trades away its presence in the
+> combined and merged UMAPs.
+
+Combined UMAP filenames embed the actual cell count (`umap_all351_by_cluster.pdf`)
+and are derived at runtime — the previously hardcoded `umap_all372_*` names silently
+became wrong as soon as the cell count changed.
 
 ### Expression matrix columns
 
@@ -224,9 +344,20 @@ gene symbols, jittered VST points).
 | `ensembl_id` | Ensembl gene ID |
 | `gene_symbol` | Common gene name (GENCODE vM33) |
 | `mean_VST_{condition}` | Mean VST expression, one column per condition present on that plate (e.g. `mean_VST_CD45pos_MHCIIpos`, `mean_VST_CD45neg_MHCIIhi`, ...) |
+| `n_cells_{condition}` | Number of cells in that condition on that plate |
+| `pct_detected_{condition}` | % of those cells with ≥1 raw read for the gene |
+| `median_CPM_detected_{condition}` | Median CPM computed **only** across the cells that detected the gene (`NA` if none) |
 | `rank_upregulated_{condition}` | Upregulation rank vs the reference condition (1 = most upregulated), one column per non-reference condition (e.g. `rank_upregulated_MHCIIhi`/`MHCIIlo` for most plates, `rank_upregulated_MHCIIpos` for NODPDL1) |
 
 Ranks use combined score `log2FC × -log10(padj)`.
+
+**Reading mean_VST vs. the detection columns.** `mean_VST` is a mean of a
+compressive log-like scale, so it cannot distinguish "off in every cell" from
+"high in a minority of cells" — a gene expressed strongly in 4 of 30 cells lands
+near the VST floor and reads as absent. A **low `mean_VST` with a high
+`median_CPM_detected` and low `pct_detected`** is the signature of a bimodal /
+subset-expressed gene (e.g. `Cd274` in NODPDL1), not of true absence. Always
+check the detection columns before calling a gene negative.
 
 ### Per-strain UMAPs
 
@@ -272,6 +403,25 @@ mean expression profiles of VAF, VRC, and CD45pos populations from Clarke et al.
 mouse pancreatic islet data. CD45neg cells are assigned to VAF or VRC via k-means
 clustering scored against known marker genes (Col1a1/Col1a2 for VAF;
 Pecam1/Eng/Cdh5 for VRC).
+
+### CD45− MHCII+ cluster distribution sheet
+
+`VAF_VRC_correlation_merged_clusters.xlsx` (CombinedwithVAFPaperPlots) carries an
+extra `CD45neg_Cluster_Distribution` sheet answering "where does each CD45−
+MHCII+ cell land, cluster-wise, per strain?" The CD45+ MHCII+ wells are
+normalization/reference only and are **excluded**; Clarke VAF/VRC cells are kept
+as labeled reference rows (`Clarke2025 (ref)`), Clarke CD45pos is excluded.
+
+| Table | Contents |
+|---|---|
+| 1 | Cell counts by strain, all CD45− subgates pooled |
+| 2 | Row percentages by strain (each row sums to 100%) |
+| 3 | Cell counts by strain × MHCII subgate (MHCIIhi / MHCIIlo / MHCIIpos / VAF / VRC) |
+| 4 | Row percentages by strain × subgate |
+
+Each row's dominant cluster is highlighted green; a bold `All CD45- cells`
+column-total row closes every table. Clusters are the merged all-gene PCA +
+Leiden clusters.
 
 ### Mouse Cell Atlas correlation
 

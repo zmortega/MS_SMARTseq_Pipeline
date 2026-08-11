@@ -11,18 +11,27 @@ suppressPackageStartupMessages({
 # per_strain_plots.R
 #
 # Runs fully independent per-strain DESeq2 analyses (one per plate), each
-# normalized using only that strain's own CD45pos_MHCIIpos reference wells for
-# size factor estimation. Strains/plates are discovered dynamically from
-# data/metadata.csv (strain column) — adding a new plate (e.g. NOD3) needs no
-# code changes here, just metadata rows. Produces, per strain:
+# normalized using only that strain's own reference wells for size factor
+# estimation. The reference is CD45pos_MHCIIpos for most plates, but is
+# per-plate configurable via REF_CONDITION_OVERRIDES: the NODCD31 plate has no
+# CD45pos wells at all (all 96 are CD45- MHCII+, split CD31-/CD31+) and is
+# baselined on its own CD31- wells instead.
+#
+# Strains/plates are discovered dynamically from data/metadata.csv (strain
+# column) — adding a new plate (e.g. NOD3) needs no code changes here, just
+# metadata rows, unless that plate lacks CD45pos_MHCIIpos wells, in which case
+# add one line to REF_CONDITION_OVERRIDES. Produces, per strain:
 #   - 1 volcano + 1 violin PDF per contrast (3 of each for strains with the
 #       CD45pos/MHCIIhi/MHCIIlo design; fewer for plates with a simpler
-#       condition scheme, e.g. NODPDL1's single CD45neg population)
+#       condition scheme, e.g. NODPDL1's single CD45neg population or
+#       NODCD31's single CD31+ vs CD31- contrast)
 #   - 1 expression matrix CSV (all genes, mean VST per condition group,
 #       upregulation ranking per non-reference condition)
 #   - 3 UMAP PDFs:
 #       1. All populations, colored by population
-#       2. CD45neg only (all non-reference conditions), colored by population
+#       2. CD45neg only, colored by population. Membership is decided by the
+#          CD45 gate (is_cd45neg), NOT by "everything except the reference" —
+#          on NODCD31 the reference is itself CD45-.
 #       3. CD45neg only, colored by Leiden cluster
 #
 # Combined/merged analyses group plates by biological strain_group (see
@@ -116,6 +125,27 @@ rownames(meta) <- meta$cell_id
 cat("Total cells in count matrix:", ncol(counts), "\n")
 cat("Total cells in metadata:    ", nrow(meta),   "\n\n")
 
+# -- Align metadata rows to count matrix columns -------------------------------
+# CRITICAL: featureCounts orders columns by the BAM order it was given
+# (B6G7_A10, B6G7_A11, B6G7_A12, B6G7_A1, ...), which is NOT the row order of
+# data/metadata.csv (B6G7_A1, B6G7_A10, ...). Any logical mask computed from the
+# count columns (e.g. the MHCII filter below) must therefore never be applied
+# positionally to `meta`. Reorder meta to match colnames(counts) once, here, so
+# row i of meta always describes column i of counts.
+missing_meta   <- setdiff(colnames(counts), rownames(meta))
+missing_counts <- setdiff(rownames(meta), colnames(counts))
+if (length(missing_meta) > 0)
+  stop("Cells in count matrix with no metadata row: ",
+       paste(head(missing_meta, 10), collapse=", "))
+if (length(missing_counts) > 0) {
+  cat("  NOTE: dropping", length(missing_counts),
+      "metadata rows with no count column\n")
+}
+meta <- meta[colnames(counts), , drop=FALSE]
+stopifnot(identical(rownames(meta), colnames(counts)),
+          identical(meta$cell_id,   colnames(counts)))
+cat("  Metadata aligned to count matrix column order:", nrow(meta), "cells\n\n")
+
 # -- Ensembl -> gene symbol map ------------------------------------------------
 sym_file <- "/tmp/ensembl_to_symbol.txt"
 if (file.exists(sym_file)) {
@@ -174,6 +204,9 @@ logcpm_mat  <- log1p(cpm_mat)
 # (conservative — better to keep borderline cells and let VST decide)
 LOGCPM_PROXY <- log1p(5)
 passes <- colSums(logcpm_mat >= LOGCPM_PROXY) == 2
+# Name the mask by cell_id so every use below is by name, never by position.
+names(passes) <- colnames(counts)
+pass_cells    <- names(passes)[passes]
 cat("  Cells passing MHCII filter:", sum(passes), "/", length(passes), "
 ")
 cat("  Cells removed:", sum(!passes), "
@@ -181,7 +214,7 @@ cat("  Cells removed:", sum(!passes), "
 ")
 
 # Report removals per strain x condition
-removed_df <- meta[!passes, ]
+removed_df <- meta[names(passes)[!passes], , drop=FALSE]
 if (nrow(removed_df) > 0) {
   cat("  Removed cells breakdown:
 ")
@@ -190,9 +223,11 @@ if (nrow(removed_df) > 0) {
 ")
 }
 
-# Apply filter globally — all downstream code uses these filtered objects
-counts <- counts[, passes]
-meta   <- meta[passes, ]
+# Apply filter globally — all downstream code uses these filtered objects.
+# Subset BOTH by cell_id (not by the logical mask) so they cannot desynchronize.
+counts <- counts[, pass_cells, drop=FALSE]
+meta   <- meta[pass_cells, , drop=FALSE]
+stopifnot(identical(rownames(meta), colnames(counts)))
 cat("  Filtered count matrix:", ncol(counts), "cells x", nrow(counts), "genes
 
 ")
@@ -312,16 +347,54 @@ run_mca_correlation <- function(expr_mat, cluster_vec_input, cluster_levels_inpu
 #   needed as long as data/metadata.csv has strain + strain_group set.
 strains       <- sort(unique(meta$strain))
 strain_groups <- sort(unique(meta$strain_group))
-REF_CONDITION <- "CD45pos_MHCIIpos"   # reference/normalization condition, all plates
+# -- Reference / normalization condition ---------------------------------------
+# Most plates sort a block of CD45+ MHCII+ wells that serve as the size-factor
+# reference and the DESeq2 baseline. A plate is not required to have them: the
+# NODCD31 plate is entirely CD45- MHCII+ and is instead baselined on its own
+# CD31- wells (A1-B6), so every contrast reads CD31+ vs CD31-.
+#
+# IMPORTANT: "is the reference" and "is CD45+" are NOT the same question any
+# more. Use ref_condition_for(strain) for normalization/baseline decisions, and
+# is_cd45pos()/is_cd45neg() for the biological CD45 gate (e.g. deciding which
+# cells go into the "CD45neg only" UMAPs). Conflating the two silently drops
+# NODCD31's CD31- population from the CD45- plots.
+DEFAULT_REF_CONDITION <- "CD45pos_MHCIIpos"
+REF_CONDITION <- DEFAULT_REF_CONDITION   # default; per-plate overrides below
 
-cond_colors <- c(
-  "CD45+ MHCIIpos" = "#2166AC",
-  "CD45- MHCIIhi"  = "#D6604D",
-  "CD45- MHCIIlo"  = "#4DAC26",
-  "CD45- MHCIIpos" = "#B15928"
+# Plates whose baseline is not CD45pos_MHCIIpos. Keyed by strain (plate), not
+# strain_group. Adding another such plate is a one-line entry here.
+REF_CONDITION_OVERRIDES <- c(
+  NODCD31 = "CD45neg_MHCIIpos_CD31neg"
 )
 
+ref_condition_for <- function(strain) {
+  if (strain %in% names(REF_CONDITION_OVERRIDES)) {
+    unname(REF_CONDITION_OVERRIDES[[strain]])
+  } else {
+    DEFAULT_REF_CONDITION
+  }
+}
+
+# Biological CD45 gate, read off the condition name rather than off whichever
+# condition happens to be acting as the baseline.
+is_cd45pos <- function(cond) grepl("^CD45pos", as.character(cond))
+is_cd45neg <- function(cond) !is_cd45pos(cond)
+
+cond_colors <- c(
+  "CD45+ MHCIIpos"        = "#2166AC",
+  "CD45- MHCIIhi"         = "#D6604D",
+  "CD45- MHCIIlo"         = "#4DAC26",
+  "CD45- MHCIIpos"        = "#B15928",
+  "CD45- MHCIIpos CD31-"  = "#7570B3",
+  "CD45- MHCIIpos CD31+"  = "#E6AB02"
+)
+
+# NOTE: longer condition strings must be substituted before their prefixes,
+# otherwise "CD45neg_MHCIIpos" would eat the front of
+# "CD45neg_MHCIIpos_CD31neg" and leave a mangled "CD45- MHCIIpos_CD31neg".
 clean_label <- function(x) {
+  x <- gsub("CD45neg_MHCIIpos_CD31neg", "CD45- MHCIIpos CD31-", x)
+  x <- gsub("CD45neg_MHCIIpos_CD31pos", "CD45- MHCIIpos CD31+", x)
   x <- gsub("CD45pos_MHCIIpos", "CD45+ MHCIIpos", x)
   x <- gsub("CD45neg_MHCIIhi",  "CD45- MHCIIhi",  x)
   x <- gsub("CD45neg_MHCIIlo",  "CD45- MHCIIlo",  x)
@@ -330,11 +403,14 @@ clean_label <- function(x) {
 }
 
 # Short filename-safe token for a condition (used to build contrast names like
-# "CD45pos_vs_MHCIIhi"). The reference condition always maps to "CD45pos";
-# every other condition keeps its "CD45neg_" suffix stripped, which stays
-# unique as long as non-reference conditions follow the CD45neg_* pattern.
+# "CD45pos_vs_MHCIIhi"). CD45pos_MHCIIpos collapses to "CD45pos"; every other
+# condition just has its "CD45neg_" prefix stripped, which stays unique as long
+# as non-reference conditions follow the CD45neg_* pattern. This is deliberately
+# independent of which condition is the baseline, so NODCD31's reference tokens
+# as "MHCIIpos_CD31neg" rather than being mislabeled "CD45pos".
 cond_token <- function(cond) {
-  ifelse(cond == REF_CONDITION, "CD45pos", sub("^CD45neg_", "", cond))
+  cond <- as.character(cond)
+  ifelse(cond == "CD45pos_MHCIIpos", "CD45pos", sub("^CD45neg_", "", cond))
 }
 
 # Build the pairwise DESeq2 contrasts for whichever conditions are actually
@@ -345,14 +421,20 @@ cond_token <- function(cond) {
 # reproduces the original fixed 3-contrast design exactly for strains with
 # MHCIIhi/MHCIIlo, and collapses to a single contrast for plates with only one
 # non-reference condition (e.g. NODPDL1's CD45neg_MHCIIpos).
-build_contrasts <- function(conditions_present) {
+build_contrasts <- function(conditions_present, ref_condition = REF_CONDITION) {
   conditions_present <- unique(as.character(conditions_present))
-  non_ref <- sort(setdiff(conditions_present, REF_CONDITION))
+  if (!ref_condition %in% conditions_present) {
+    stop("Reference condition '", ref_condition, "' is not present among this ",
+         "plate's conditions (", paste(conditions_present, collapse=", "), "). ",
+         "Check REF_CONDITION_OVERRIDES and the condition column in ",
+         "data/metadata.csv.")
+  }
+  non_ref <- sort(setdiff(conditions_present, ref_condition))
   pairs <- list()
   for (nr in non_ref) {
     pairs[[length(pairs) + 1]] <- list(
-      label_a = REF_CONDITION, label_b = nr,
-      num = nr, denom = REF_CONDITION
+      label_a = ref_condition, label_b = nr,
+      num = nr, denom = ref_condition
     )
   }
   if (length(non_ref) >= 2) {
@@ -442,8 +524,16 @@ for (strain in strains) {
   cat("Counts per condition:\n")
   print(table(s_meta$condition))
 
+  # -- Reference condition for this plate --------------------------------------
+  # Local (s_ref), never the global REF_CONDITION: this is a top-level for loop,
+  # so assigning REF_CONDITION here would leak the last plate's value into the
+  # combined/merged sections that run after the loop.
+  s_ref <- ref_condition_for(strain)
+  cat("Reference condition:", s_ref,
+      if (s_ref != DEFAULT_REF_CONDITION) " (per-plate override)" else "", "\n")
+
   # -- Contrasts for this strain (depends on which conditions are present) ----
-  strain_contrasts <- build_contrasts(unique(s_meta$condition))
+  strain_contrasts <- build_contrasts(unique(s_meta$condition), ref_condition=s_ref)
   cat("Contrasts for this strain:",
       paste(sapply(strain_contrasts, function(x) x$name), collapse=" | "), "\n")
 
@@ -453,7 +543,7 @@ for (strain in strains) {
   cat("Genes passing filter:", nrow(s_counts), "\n")
 
   # -- Build DESeq2 object -----------------------------------------------------
-  s_meta$condition <- relevel(factor(s_meta$condition), ref=REF_CONDITION)
+  s_meta$condition <- relevel(factor(s_meta$condition), ref=s_ref)
 
   dds <- DESeqDataSetFromMatrix(
     countData = round(as.matrix(s_counts)),
@@ -462,7 +552,7 @@ for (strain in strains) {
   )
 
   # -- Size factors from this strain's reference wells only --------------------
-  ref_cells <- s_meta$cell_id[s_meta$condition == REF_CONDITION]
+  ref_cells <- s_meta$cell_id[s_meta$condition == s_ref]
   cat("Reference cells for size factor estimation:", length(ref_cells), "\n")
 
   ref_counts   <- as.matrix(s_counts[, ref_cells])
@@ -496,14 +586,26 @@ for (strain in strains) {
 
   # -- Expression matrix -------------------------------------------------------
   cat("Writing expression matrix...\n")
-  cond_levels <- c(REF_CONDITION,
+  cond_levels <- c(s_ref,
                    sort(setdiff(unique(as.character(s_meta$condition)),
-                                REF_CONDITION)))
+                                s_ref)))
   expr_mat <- data.frame(
     ensembl_id  = rownames(expr),
     gene_symbol = to_sym(rownames(expr)),
     stringsAsFactors = FALSE
   )
+  # Per-condition columns. mean_VST is a mean of a compressive log-like scale,
+  # so it cannot distinguish "off in every cell" from "high in a minority of
+  # cells" — a gene expressed strongly in 4 of 30 cells lands near the VST
+  # floor and reads as absent. Report detection alongside it:
+  #   n_cells_<cond>              cells in this condition
+  #   pct_detected_<cond>         % of those cells with >=1 raw read
+  #   median_CPM_detected_<cond>  median CPM among only the detecting cells
+  # A low mean_VST with a high median_CPM_detected is the signature of a
+  # bimodal / subset-expressed gene (e.g. Cd274 in NODPDL1), NOT of absence.
+  cpm_s <- sweep(as.matrix(s_counts), 2, pmax(colSums(as.matrix(s_counts)), 1),
+                 "/") * 1e6
+
   for (cond in cond_levels) {
     cond_cells <- intersect(s_meta$cell_id[s_meta$condition == cond],
                             colnames(expr))
@@ -515,6 +617,27 @@ for (strain in strains) {
     } else {
       expr_mat[[col_name]] <- rowMeans(expr[, cond_cells])
     }
+
+    # -- detection statistics from the raw counts -------------------------------
+    cnt_cells <- intersect(cond_cells, colnames(s_counts))
+    expr_mat[[paste0("n_cells_", cond)]] <- length(cnt_cells)
+    if (length(cnt_cells) == 0) {
+      expr_mat[[paste0("pct_detected_", cond)]]        <- NA
+      expr_mat[[paste0("median_CPM_detected_", cond)]] <- NA
+    } else {
+      cnt_sub  <- as.matrix(s_counts[, cnt_cells, drop=FALSE])
+      cpm_sub  <- cpm_s[, cnt_cells, drop=FALSE]
+      det_mask <- cnt_sub > 0
+      n_det    <- rowSums(det_mask)
+      expr_mat[[paste0("pct_detected_", cond)]] <-
+        round(100 * n_det / length(cnt_cells), 1)
+      # median CPM across only the cells where the gene was detected
+      cpm_det  <- cpm_sub
+      cpm_det[!det_mask] <- NA
+      med_det  <- apply(cpm_det, 1, median, na.rm=TRUE)
+      med_det[n_det == 0] <- NA
+      expr_mat[[paste0("median_CPM_detected_", cond)]] <- round(med_det, 1)
+    }
   }
 
   # Upregulation rankings: one rank column per non-reference condition,
@@ -522,10 +645,10 @@ for (strain in strains) {
   # rank_upregulated_MHCIIhi / rank_upregulated_MHCIIlo for strains with that
   # design, and generalizes to however many non-reference conditions a given
   # plate actually has (e.g. a single rank_upregulated_MHCIIpos for NODPDL1).
-  non_ref_conditions <- setdiff(cond_levels, REF_CONDITION)
+  non_ref_conditions <- setdiff(cond_levels, s_ref)
   for (cond in non_ref_conditions) {
     rank_res <- as.data.frame(results(dds,
-      contrast=c("condition", cond, REF_CONDITION), alpha=0.05))
+      contrast=c("condition", cond, s_ref), alpha=0.05))
     rank_res$ensembl_id <- rownames(rank_res)
     score_col <- paste0("score_", cond_token(cond))
     rank_res[[score_col]] <- ifelse(
@@ -592,9 +715,12 @@ for (strain in strains) {
   ggsave(umap1_path, p_umap_all, width=6, height=6)
   cat("  Saved:", umap1_path, "\n")
 
-  # -- UMAP 2 & 3: CD45neg only (all non-reference conditions) ----------------
-  cd45neg_conditions <- setdiff(unique(as.character(s_meta$condition)),
-                                REF_CONDITION)
+  # -- UMAP 2 & 3: CD45neg cells only ------------------------------------------
+  # Selected by the CD45 gate, not by "everything except the reference": on
+  # NODCD31 the reference (CD31-) is itself a CD45- population and must stay in
+  # these plots, otherwise the UMAP would contain only CD31+ cells.
+  cd45neg_conditions <- Filter(is_cd45neg,
+                               unique(as.character(s_meta$condition)))
   cd45neg_cells <- s_meta$cell_id[s_meta$condition %in% cd45neg_conditions]
   cd45neg_cells <- intersect(cd45neg_cells, colnames(expr_hvg))
   expr_cd45neg  <- expr_hvg[, cd45neg_cells]
@@ -1002,7 +1128,11 @@ p_comb_clust <- ggplot(umap_comb_df,
     aspect.ratio     = 1
   )
 
-comb1_path <- file.path(combined_out, "umap_all372_by_cluster.pdf")
+# Cell count is derived, not hardcoded — the old "all372" filenames silently
+# became wrong the moment a plate was added.
+n_comb_cells <- nrow(umap_comb_df)
+comb1_path <- file.path(combined_out,
+                        paste0("umap_all", n_comb_cells, "_by_cluster.pdf"))
 ggsave(comb1_path, p_comb_clust, width=7, height=6)
 cat("Saved:", comb1_path, "\n")
 
@@ -1019,7 +1149,10 @@ make_group_palette <- function(groups) {
 }
 strain_base_colors <- make_group_palette(strain_groups)
 
-ref_label       <- clean_label(REF_CONDITION)
+# Combined palette: the CD45+ reference is drawn most opaque, every other
+# condition fades from it. Uses the default reference (not any per-plate
+# override) since this ordering spans all plates at once.
+ref_label       <- clean_label(DEFAULT_REF_CONDITION)
 non_ref_labels  <- sort(setdiff(cond_list, ref_label))
 ordered_conds   <- c(ref_label, non_ref_labels)
 condition_alpha <- setNames(
@@ -1068,7 +1201,9 @@ p_comb_strain <- ggplot(umap_comb_df,
     aspect.ratio     = 1
   )
 
-comb2_path <- file.path(combined_out, "umap_all372_by_strain_population.pdf")
+comb2_path <- file.path(combined_out,
+                        paste0("umap_all", n_comb_cells,
+                               "_by_strain_population.pdf"))
 ggsave(comb2_path, p_comb_strain, width=8, height=6)
 cat("Saved:", comb2_path, "\n")
 
@@ -1943,72 +2078,124 @@ cat("\nGenerating combined cluster violin plots...\n")
 # Genes to plot - add more symbols to this vector to include additional plots
 VIOLIN_GENES <- c("Ptprc")
 
-# Look up Ensembl IDs for violin genes
+# NOTE: violin genes are sourced from the PER-PLATE VST matrices
+# (all_expr_list), not from combined_expr. combined_expr is the intersection of
+# genes surviving each plate's rowSums>=10 filter, so a gene that is genuinely
+# absent from one plate vanishes from the combined matrix entirely — Ptprc
+# (CD45) has exactly 0 counts across all 96 NODCD31 cells, because that plate is
+# a pure CD45- sort with no CD45+ reference block. Keying off combined_expr
+# therefore silently deleted the CD45-purity QC plot the moment NODCD31 was
+# added. Pulling per-plate keeps the panel meaningful: cells from plates that
+# retain the gene are plotted, and plates where it is absent are reported
+# explicitly below rather than being quietly dropped.
 violin_ens <- sym_to_ens_map[VIOLIN_GENES]
-violin_ens <- violin_ens[!is.na(violin_ens) & violin_ens %in% rownames(combined_expr)]
+violin_ens <- violin_ens[!is.na(violin_ens)]
 
 missing_genes <- setdiff(VIOLIN_GENES, names(violin_ens))
 if (length(missing_genes) > 0) {
-  cat("  Warning: genes not found in matrix:", paste(missing_genes, collapse=", "), "\n")
+  cat("  Warning: no Ensembl ID for:", paste(missing_genes, collapse=", "), "\n")
 }
-cat("  Genes to plot:", paste(names(violin_ens), collapse=", "), "\n")
 
-# Build long-format dataframe for all violin genes
-vln_comb_df <- as.data.frame(t(combined_expr[violin_ens, umap_comb_df$cell_id,
-                                              drop=FALSE])) %>%
-  tibble::rownames_to_column("cell_id") %>%
-  left_join(umap_comb_df[, c("cell_id", "cluster")], by="cell_id") %>%
-  pivot_longer(-c(cell_id, cluster), names_to="ensembl_id", values_to="VST") %>%
-  mutate(
-    gene_symbol = to_sym(ensembl_id),
-    cluster     = factor(cluster, levels=sort(unique(as.integer(
-                    as.character(umap_comb_df$cluster)))))
-  )
+# Which plates carry each violin gene, and which dropped it?
+if (length(violin_ens) > 0) {
+  for (i in seq_along(violin_ens)) {
+    have <- names(all_expr_list)[
+      vapply(all_expr_list, function(e) violin_ens[i] %in% rownames(e), logical(1))]
+    lost <- setdiff(names(all_expr_list), have)
+    cat("  ", names(violin_ens)[i], ": present in ", length(have), "/",
+        length(all_expr_list), " plates",
+        if (length(lost) > 0)
+          paste0(" (absent from: ", paste(lost, collapse=", "), ")") else "",
+        "\n", sep="")
+  }
+}
 
-# One violin panel per gene
-vln_gene_plots <- lapply(seq_along(violin_ens), function(i) {
-  ens  <- violin_ens[i]
-  sym  <- names(violin_ens)[i]
-  df_g <- vln_comb_df %>% filter(ensembl_id == ens)
+# Long-format frame, assembled plate by plate so a gene missing from one plate
+# costs only that plate's cells rather than the whole panel.
+vln_comb_df <- bind_rows(lapply(names(all_expr_list), function(pl) {
+  e    <- all_expr_list[[pl]]
+  ens  <- violin_ens[violin_ens %in% rownames(e)]
+  if (length(ens) == 0) return(NULL)
+  cells <- intersect(umap_comb_df$cell_id, colnames(e))
+  if (length(cells) == 0) return(NULL)
+  as.data.frame(t(e[ens, cells, drop=FALSE])) %>%
+    tibble::rownames_to_column("cell_id") %>%
+    pivot_longer(-cell_id, names_to="ensembl_id", values_to="VST")
+}))
 
-  ggplot(df_g, aes(x=cluster, y=VST, fill=cluster)) +
-    geom_violin(trim=TRUE, scale="width", alpha=0.85, linewidth=0.3) +
-    geom_jitter(width=0.15, size=0.6, alpha=0.35, color="grey20") +
-    scale_fill_manual(values=cluster_pal_comb) +
-    labs(
-      title = sym,
-      x     = "Leiden Cluster",
-      y     = "VST expression"
-    ) +
-    theme_bw(base_size=11) +
-    theme(
-      plot.title       = element_text(face="bold.italic", size=11),
-      legend.position  = "none",
-      panel.grid.minor = element_blank()
+if (nrow(vln_comb_df) == 0) {
+  cat("  No violin genes present in any plate — skipping violin plots.\n")
+} else {
+  vln_comb_df <- vln_comb_df %>%
+    left_join(umap_comb_df[, c("cell_id", "cluster")], by="cell_id") %>%
+    mutate(
+      gene_symbol = to_sym(ensembl_id),
+      cluster     = factor(cluster, levels=sort(unique(as.integer(
+                      as.character(umap_comb_df$cluster)))))
     )
-})
 
-# Arrange into a grid — wrap at 3 per row
-n_genes    <- length(vln_gene_plots)
-n_cols_vln <- min(3, n_genes)
-n_rows_vln <- ceiling(n_genes / n_cols_vln)
+  # Only genes that actually made it into the frame get a panel.
+  plotted_ens <- violin_ens[violin_ens %in% unique(vln_comb_df$ensembl_id)]
 
-vln_combined <- wrap_plots(vln_gene_plots, ncol=n_cols_vln) +
-  plot_annotation(
-    title    = "Gene expression across Leiden clusters",
-    subtitle = paste0("VST-normalized | n=", nrow(umap_comb_df), " cells | ",
-                      n_clust_comb, " clusters"),
-    theme    = theme(
-      plot.title    = element_text(face="bold", size=13),
-      plot.subtitle = element_text(size=9, color="grey40")
+  # One violin panel per gene
+  vln_gene_plots <- lapply(seq_along(plotted_ens), function(i) {
+    ens  <- plotted_ens[i]
+    sym  <- names(plotted_ens)[i]
+    df_g <- vln_comb_df %>% filter(ensembl_id == ens)
+
+    # Name the plates contributing cells, so a panel drawn from a subset of
+    # plates can never be mistaken for one drawn from all of them.
+    n_pl  <- sum(vapply(all_expr_list, function(e) ens %in% rownames(e),
+                        logical(1)))
+    absent <- names(all_expr_list)[
+      !vapply(all_expr_list, function(e) ens %in% rownames(e), logical(1))]
+    sub_g <- paste0("n=", nrow(df_g), " cells from ", n_pl, "/",
+                    length(all_expr_list), " plates",
+                    if (length(absent) > 0)
+                      paste0(" — 0 counts in: ", paste(absent, collapse=", "))
+                    else "")
+
+    ggplot(df_g, aes(x=cluster, y=VST, fill=cluster)) +
+      geom_violin(trim=TRUE, scale="width", alpha=0.85, linewidth=0.3) +
+      geom_jitter(width=0.15, size=0.6, alpha=0.35, color="grey20") +
+      scale_fill_manual(values=cluster_pal_comb) +
+      labs(
+        title    = sym,
+        subtitle = sub_g,
+        x        = "Leiden Cluster",
+        y        = "VST expression"
+      ) +
+      theme_bw(base_size=11) +
+      theme(
+        plot.title       = element_text(face="bold.italic", size=11),
+        plot.subtitle    = element_text(size=7.5, color="grey40"),
+        legend.position  = "none",
+        panel.grid.minor = element_blank()
+      )
+  })
+
+  # Arrange into a grid — wrap at 3 per row
+  n_genes    <- length(vln_gene_plots)
+  n_cols_vln <- min(3, n_genes)
+  n_rows_vln <- ceiling(n_genes / n_cols_vln)
+
+  vln_combined <- wrap_plots(vln_gene_plots, ncol=n_cols_vln) +
+    plot_annotation(
+      title    = "Gene expression across Leiden clusters",
+      subtitle = paste0("VST-normalized | n=", nrow(umap_comb_df), " cells | ",
+                        n_clust_comb, " clusters"),
+      theme    = theme(
+        plot.title    = element_text(face="bold", size=13),
+        plot.subtitle = element_text(size=9, color="grey40")
+      )
     )
-  )
 
-vln_path <- file.path(combined_out, "violin_plots_by_cluster.pdf")
-ggsave(vln_path, vln_combined,
-       width  = n_cols_vln * 5,
-       height = n_rows_vln * 5)
-cat("Saved:", vln_path, "\n")
+  vln_path <- file.path(combined_out, "violin_plots_by_cluster.pdf")
+  ggsave(vln_path, vln_combined,
+         width  = n_cols_vln * 5,
+         height = n_rows_vln * 5)
+  cat("Saved:", vln_path, "\n")
+}
 
 cat("\n==============================================================\n")
 cat("All outputs complete. Output structure:\n")
@@ -2016,8 +2203,8 @@ for (st in strains) {
   cat(" results/05_dge/", st, "_plots/  (file count varies with # of contrasts)\n", sep="")
 }
 cat(" results/05_dge/combined_plots/\n")
-cat("   - umap_all372_by_cluster.pdf\n")
-cat("   - umap_all372_by_strain_population.pdf\n")
+cat("   - umap_all", n_comb_cells, "_by_cluster.pdf\n", sep="")
+cat("   - umap_all", n_comb_cells, "_by_strain_population.pdf\n", sep="")
 cat("   - barplots_cluster_composition.pdf  (all 4 charts, 2x2)\n")
 cat("   - cluster_marker_genes.xlsx\n")
 cat("   - heatmap_cluster_markers.pdf\n")
@@ -2512,8 +2699,25 @@ if (!file.exists(vaf_counts_f2)) {
 
   # -- Cluster violin plots ----------------------------------------------------
   cat("Generating merged cluster violin plots...\n")
+  # Unlike the combined violins above, these CANNOT fall back to the per-plate
+  # VST matrices: merged_expr is limma batch-corrected across your cells +
+  # Clarke, so splicing in an uncorrected per-plate value would put two
+  # different scales on one axis. A gene missing here is genuinely
+  # unplottable in the merged space, so the panel is skipped with a reason
+  # rather than silently omitted or crashed on.
   vln_ens_m <- sym_to_ens_m[VIOLIN_GENES]
   vln_ens_m <- vln_ens_m[!is.na(vln_ens_m) & vln_ens_m %in% rownames(merged_expr)]
+
+  dropped_m <- setdiff(VIOLIN_GENES, names(vln_ens_m))
+  if (length(dropped_m) > 0) {
+    cat("  Not plottable in merged space:", paste(dropped_m, collapse=", "), "\n")
+    cat("  (merged_expr keeps only genes shared by every plate AND Clarke;\n")
+    cat("   e.g. Ptprc has 0 counts in NODCD31, so it leaves the intersection.)\n")
+  }
+
+  if (length(vln_ens_m) == 0) {
+    cat("  No violin genes available in merged matrix — skipping merged violins.\n")
+  } else {
 
   vln_m_df <- as.data.frame(t(merged_expr[vln_ens_m, umap_m_df$cell_id,
                                             drop=FALSE])) %>%
@@ -2550,6 +2754,7 @@ if (!file.exists(vaf_counts_f2)) {
          vln_m_panel,
          width=min(3,n_vln_m)*5, height=ceiling(n_vln_m/3)*5)
   cat("Saved: violin_plots_by_cluster.pdf\n")
+  }
 
   # -- VAF/VRC correlation on merged clusters ----------------------------------
   cat("Running VAF/VRC correlation on merged clusters...\n")
@@ -2599,6 +2804,140 @@ if (!file.exists(vaf_counts_f2)) {
       setColWidths(wb_vaf_m, sn_m, cols=1:4, widths=c(22,12,14,10))
     }
     addWorksheet(wb_vaf_m, "Summary"); writeData(wb_vaf_m, "Summary", summary_vaf_m)
+
+    # -- CD45- MHCII+ cluster distribution --------------------------------------
+    # Where does each CD45- MHCII+ cell land, cluster-wise, per strain?
+    # The CD45+ MHCII+ normalization/reference wells are excluded, as are the
+    # Clarke CD45pos cells. Clarke VAF/VRC are kept as labeled reference rows.
+    # Exclusion is by the CD45 gate, not by "is the reference": NODCD31's
+    # baseline (CD31-) is a CD45- population and belongs in this table.
+    cat("Building CD45- MHCII+ cluster distribution sheet...\n")
+
+    cd45neg_m_df <- umap_m_df %>%
+      filter(is_cd45neg(condition)) %>%
+      mutate(
+        row_strain = ifelse(strain_group == "Clarke2025",
+                            "Clarke2025 (ref)", strain),
+        subgate    = ifelse(strain_group == "Clarke2025",
+                            sub("^Clarke2025 ", "", strain_condition),
+                            sub("^CD45neg_", "", condition))
+      )
+
+    cl_cols_cd <- paste0("Cluster_", as.character(cluster_levels_m))
+
+    # Wide count table + an "All CD45- cells" column-total row
+    mk_wide_cd <- function(df, keys) {
+      w <- df %>%
+        group_by(across(all_of(keys)), cluster) %>%
+        summarise(n=n(), .groups="drop") %>%
+        mutate(cluster=paste0("Cluster_", as.character(cluster))) %>%
+        pivot_wider(names_from=cluster, values_from=n, values_fill=0) %>%
+        as.data.frame()
+      for (cc in setdiff(cl_cols_cd, colnames(w))) w[[cc]] <- 0L
+      w <- w[, c(keys, cl_cols_cd), drop=FALSE]
+      if (nrow(w) == 0) return(w)
+      w$Total_cells <- rowSums(w[, cl_cols_cd, drop=FALSE])
+      ord <- if (length(keys) > 1) order(w[[keys[1]]], w[[keys[2]]]) else
+                                  order(w[[keys[1]]])
+      w   <- w[ord, , drop=FALSE]
+      tot <- w[1, , drop=FALSE]
+      tot[1, keys] <- as.list(c("All CD45- cells", rep("", length(keys) - 1)))
+      tot[1, c(cl_cols_cd, "Total_cells")] <-
+        as.list(colSums(w[, c(cl_cols_cd, "Total_cells"), drop=FALSE]))
+      out <- rbind(w, tot)
+      rownames(out) <- NULL
+      out
+    }
+
+    # Row-normalized percentages (each row sums to 100%)
+    mk_pct_cd <- function(w) {
+      p <- w
+      p[, cl_cols_cd] <- round(sweep(as.matrix(w[, cl_cols_cd, drop=FALSE]), 1,
+                                      pmax(w$Total_cells, 1), "/") * 100, 1)
+      p
+    }
+
+    pooled_cd  <- mk_wide_cd(cd45neg_m_df, "row_strain")
+    broken_cd  <- mk_wide_cd(cd45neg_m_df, c("row_strain","subgate"))
+    names(pooled_cd)[1] <- "strain"
+    names(broken_cd)[1] <- "strain"
+
+    sn_cd <- "CD45neg_Cluster_Distribution"
+    addWorksheet(wb_vaf_m, sn_cd)
+    st_h1  <- createStyle(textDecoration="bold", fontSize=13)
+    st_ttl <- createStyle(textDecoration="bold", fontSize=12)
+    st_sub <- createStyle(fontSize=9, fontColour="#595959",
+                          textDecoration="italic")
+    st_hdr <- createStyle(textDecoration="bold", fgFill="#E2EFDA",
+                          halign="center", border="bottom")
+    st_tot <- createStyle(textDecoration="bold", fgFill="#F2F2F2",
+                          halign="center")
+    st_ctr <- createStyle(halign="center")
+    st_max <- createStyle(textDecoration="bold", fgFill="#C6EFCE",
+                          halign="center")
+    st_pct <- createStyle(halign="center", numFmt="0.0")
+
+    writeData(wb_vaf_m, sn_cd,
+      "CD45- MHCII+ cell distribution across merged Leiden clusters", startRow=1)
+    addStyle(wb_vaf_m, sn_cd, st_h1, rows=1, cols=1)
+    writeData(wb_vaf_m, sn_cd, paste0(
+      "Dataset: your cells + Clarke et al. 2025 (CombinedwithVAFPaperPlots). ",
+      "CD45+ MHCII+ reference/normalization wells are EXCLUDED. ",
+      "Clusters are the merged all-gene PCA + Leiden clusters."), startRow=2)
+    addStyle(wb_vaf_m, sn_cd, st_sub, rows=2, cols=1)
+
+    row_cd <- 4
+    put_block_cd <- function(df, title, note, is_pct=FALSE) {
+      n_key  <- sum(!colnames(df) %in% c(cl_cols_cd, "Total_cells"))
+      ncol_d <- ncol(df)
+      writeData(wb_vaf_m, sn_cd, title, startRow=row_cd)
+      addStyle(wb_vaf_m, sn_cd, st_ttl, rows=row_cd, cols=1); row_cd <<- row_cd + 1
+      writeData(wb_vaf_m, sn_cd, note, startRow=row_cd)
+      addStyle(wb_vaf_m, sn_cd, st_sub, rows=row_cd, cols=1); row_cd <<- row_cd + 1
+      writeData(wb_vaf_m, sn_cd, df, startRow=row_cd, borders="none")
+      addStyle(wb_vaf_m, sn_cd, st_hdr, rows=row_cd, cols=1:ncol_d,
+               gridExpand=TRUE)
+      body_first <- row_cd + 1
+      body_last  <- row_cd + nrow(df) - 1   # last data row (total row excluded)
+      addStyle(wb_vaf_m, sn_cd, if (isTRUE(is_pct)) st_pct else st_ctr,
+               rows=body_first:body_last, cols=(n_key+1):ncol_d,
+               gridExpand=TRUE)
+      # highlight each row's dominant cluster
+      for (i in seq_len(nrow(df) - 1)) {
+        vals <- as.numeric(unlist(df[i, cl_cols_cd]))
+        if (max(vals) > 0) {
+          j <- n_key + which(vals == max(vals))
+          addStyle(wb_vaf_m, sn_cd, st_max, rows=body_first + i - 1, cols=j,
+                   gridExpand=TRUE)
+        }
+      }
+      addStyle(wb_vaf_m, sn_cd, st_tot, rows=row_cd + nrow(df),
+               cols=1:ncol_d, gridExpand=TRUE)
+      row_cd <<- row_cd + nrow(df) + 3
+    }
+
+    put_block_cd(pooled_cd,
+      "Table 1 - Cell counts by strain (all CD45- subgates pooled)",
+      paste0("Rows = strain; values = number of CD45- MHCII+ cells assigned to ",
+             "each cluster. Green = that strain's dominant cluster."))
+    put_block_cd(mk_pct_cd(pooled_cd),
+      "Table 2 - Row percentages by strain (% of that strain's CD45- cells)",
+      "Each row sums to 100%.", is_pct=TRUE)
+    put_block_cd(broken_cd,
+      "Table 3 - Cell counts by strain and MHCII subgate",
+      paste0("MHCIIhi / MHCIIlo = per-plate sort gates; MHCIIpos = a single ",
+             "CD45- gate (e.g. NODPDL1); VAF / VRC = Clarke 2025 reference ",
+             "CD45- populations."))
+    put_block_cd(mk_pct_cd(broken_cd),
+      "Table 4 - Row percentages by strain and MHCII subgate",
+      "Each row sums to 100%.", is_pct=TRUE)
+
+    setColWidths(wb_vaf_m, sn_cd, cols=1:(length(cl_cols_cd) + 3),
+                 widths=c(20, 14, rep(12, length(cl_cols_cd) + 1)))
+    freezePane(wb_vaf_m, sn_cd, firstActiveRow=4)
+    cat("  Sheet added:", sn_cd, "-",
+        nrow(cd45neg_m_df), "CD45- cells tabulated\n")
+
     saveWorkbook(wb_vaf_m,
                  file.path(vaf_out_dir, "VAF_VRC_correlation_merged_clusters.xlsx"),
                  overwrite=TRUE)
@@ -2707,8 +3046,8 @@ for (st in strains) {
   cat(" results/05_dge/", st, "_plots/  (file count varies with # of contrasts)\n", sep="")
 }
 cat(" results/05_dge/combined_plots/\n")
-cat("   - umap_all372_by_cluster.pdf\n")
-cat("   - umap_all372_by_strain_population.pdf\n")
+cat("   - umap_all", n_comb_cells, "_by_cluster.pdf\n", sep="")
+cat("   - umap_all", n_comb_cells, "_by_strain_population.pdf\n", sep="")
 cat("   - barplots_cluster_composition.pdf  (all 4 charts, 2x2)\n")
 cat("   - cluster_marker_genes.xlsx\n")
 cat("   - heatmap_cluster_markers.pdf\n")

@@ -38,10 +38,24 @@ FC_MIN_MAPQ: 10
 # ── DESeq2 differential expression ────────────────────────────────────────────
 METADATA_FILE: "/Users/zachortega/Desktop/MS_SMARTseq_Pipeline/data/metadata.csv"
 # Design includes batch correction (L001 vs L002 plates) + condition + strain
-# condition = cell population (CD45pos_MHCIIpos, CD45neg_MHCIIlo, CD45neg_MHCIIhi)
-# strain    = mouse genotype (NOD, B6G7, B6MHCIIGFP, NODPDL1)
+# condition = cell population (CD45pos_MHCIIpos, CD45neg_MHCIIlo, CD45neg_MHCIIhi,
+#             CD45neg_MHCIIpos, CD45neg_MHCIIpos_CD31neg, CD45neg_MHCIIpos_CD31pos)
+# strain    = plate/genotype (B6G7, B6MHCIIGFP, NOD, NOD2, NODPDL1, NODCD31)
+#
+# WARNING: this global design is rank-deficient and has been since before
+# NODCD31 — each strain sits in exactly one batch, so batch is fully determined
+# by strain (rank 8 of 10 columns pre-NODCD31, 10 of 14 with it). NODCD31 adds a
+# second dependency: it has no CD45pos_MHCIIpos wells, so its strain indicator is
+# exactly the sum of its two CD31 condition indicators. DESeq2 will refuse this
+# formula with "model matrix is not full rank". Drop `batch`, or model
+# strain:condition, before relying on the global DESeq2 step in pipeline.py.
+# The per-plate analysis in scripts/per_strain_plots.R uses `~ condition` within
+# a single plate and is unaffected.
 DESIGN_FORMULA: "~ batch + strain + condition"
-REFERENCE_LEVEL: "CD45pos_MHCIIpos"  # reference condition for DESeq2
+# Reference condition for the global DESeq2 step. Per-plate references live in
+# REF_CONDITION_OVERRIDES in scripts/per_strain_plots.R — NODCD31 is baselined on
+# CD45neg_MHCIIpos_CD31neg because it has no CD45pos_MHCIIpos wells at all.
+REFERENCE_LEVEL: "CD45pos_MHCIIpos"
 PADJ_THRESHOLD: 0.05
 LFC_THRESHOLD: 1.0
 MIN_COUNTS: 10
