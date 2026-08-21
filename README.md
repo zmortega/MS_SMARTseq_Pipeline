@@ -45,6 +45,7 @@ FASTQ (R1/R2 per cell)
         │       └── MCA cell type correlation Excel (Mouse Cell Atlas)
         └── Combined + Clarke 2025 analysis (your cells + Clarke et al. mouse data)
                 ├── Same outputs as combined analysis above
+                ├── Pairwise cluster contrasts vs VAF / VRC (two-sided, up + down)
                 ├── limma batch correction applied before embedding
                 └── Clarke cells treated as additional strain "Clarke2025"
 ```
@@ -211,6 +212,7 @@ results/
 │       ├── umap_per_strain_on_merged.pdf
 │       ├── barplots_cluster_composition.pdf
 │       ├── cluster_marker_genes.xlsx
+│       ├── cluster_pairwise_contrasts.xlsx      (merged folder only)
 │       ├── heatmap_cluster_markers.pdf
 │       ├── violin_plots_by_cluster.pdf
 │       ├── cell_identity_merged_clusters.xlsx
@@ -302,12 +304,14 @@ absent from its metadata, rather than silently producing zero contrasts.
 Each contrast gets one volcano PDF and one violin PDF (top 10 up + top 10 down DEGs,
 gene symbols, jittered VST points).
 
-### Combined gene set — adding a plate shrinks it
+### Combined gene set — an all-plate intersection
 
 `common_genes <- Reduce(intersect, ...)` keeps only genes that survive **every**
 plate's `rowSums >= 10` filter, so a gene genuinely absent from one plate leaves the
-combined matrix for all plates. Adding NODCD31 took the intersection from
-**12,755 → 12,055 genes (−700, 5.5%)**.
+combined matrix for all plates. Current run: per-plate filters keep 11,206–17,375
+genes, and the intersection across all six plates is **8,948 genes**. The merged
+(your cells + Clarke) matrix intersects that again with Clarke's mappable genes:
+**7,772 genes × 469 cells**.
 
 This is not cosmetic. The combined UMAP picks HVGs from that intersection, so the
 gene set change reshuffles Leiden clustering for *every* plate — **cluster numbering
@@ -315,23 +319,41 @@ is not comparable across runs where the plate roster changed.** Snapshot
 `results/05_dge/` before re-running if you need old cluster IDs (see
 `results/05_dge_pre_fix/` for the pre-alignment-fix state).
 
-The most visible casualty is `Ptprc` (CD45): it has **exactly 0 counts across all 96
+#### The violin-gene filter exemption
+
+The canonical case is `Ptprc` (CD45): it has **exactly 0 counts across all 96
 NODCD31 cells**, because that plate is a pure CD45− sort with no CD45+ reference
-block. That is the sort working correctly, not a QC failure.
+block. That is the sort working correctly, not a QC failure — but the intersection
+rule turned it into a deletion, and one plate's honest zero removed the CD45-purity
+QC plot for every plate. Col1a1/Col1a2 hit the same wall (a pure CD31 sort contains
+no fibroblasts).
 
-Consequences for the two violin panels, which both plot the hardcoded `VIOLIN_GENES`:
+The per-plate filter is therefore now:
 
-| Panel | Behavior |
+```r
+keep <- rowSums(s_counts) >= 10 | rownames(s_counts) %in% violin_keep_ens
+```
+
+**A zero count is a measurement, not a missing value.** Exempting `VIOLIN_GENES`
+keeps real VST values — at the floor, where counts are zero — flowing through to
+`combined_expr` and `merged_expr`, so these genes are plottable *as zeros* rather
+than absent. All 18 violin genes now resolve in **6/6 plates** and in the merged
+matrix; the exemption force-retained 1–7 genes per plate that the filter would
+otherwise have dropped, and grew the intersection by 14 genes (8,934 → 8,948).
+
+**Cost:** exempted genes are forced into each plate's DESeq2 object even when
+all-zero there. Their own DE statistics on such a plate are meaningless (expect
+`NA` padj), and they add ~18 of ~12,000 genes to the multiple-testing burden.
+**Do not extend this list to hundreds of genes.**
+
+Both violin panels still fail soft — they previously crashed outright
+(`pivot_longer(): cols must select at least one column`) when a gene resolved to
+nothing:
+
+| Panel | Behavior when a gene is still unavailable |
 |---|---|
-| `combined_plots/violin_plots_by_cluster.pdf` | Sources each gene from the **per-plate** VST matrices (`all_expr_list`), not from `combined_expr`. Ptprc plots from the 5 plates that retain it, and the panel subtitle names the plates where it is absent. |
+| `combined_plots/violin_plots_by_cluster.pdf` | Sources each gene from the **per-plate** VST matrices (`all_expr_list`), not from `combined_expr`. Plots from whichever plates retain the gene; the panel subtitle names the plates where it is absent. |
 | `CombinedwithVAFPaperPlots/violin_plots_by_cluster.pdf` | **Skipped for genes missing from `merged_expr`, with the reason logged.** Cannot use the per-plate fallback: `merged_expr` is `limma::removeBatchEffect`-corrected across your cells + Clarke, so an uncorrected per-plate value would put two scales on one axis. |
-
-Both panels previously crashed outright (`pivot_longer(): cols must select at least
-one column`) when a gene resolved to nothing. Both now fail soft.
-
-> If the merged Ptprc violin matters for a figure, the only way to recover it is to
-> exclude NODCD31 from the combined analysis, which trades away its presence in the
-> combined and merged UMAPs.
 
 Combined UMAP filenames embed the actual cell count (`umap_all351_by_cluster.pdf`)
 and are derived at runtime — the previously hardcoded `umap_all372_*` names silently
@@ -391,6 +413,52 @@ however many strain groups/conditions are present, rather than a fixed 4×3 pale
 One-vs-rest Wilcoxon on VST matrix. Pre-filter: log2FC ≥ 0.5. BH correction.
 Top 100 per cluster in Excel, top 15 per cluster in heatmap.
 
+**One-sided and upregulated-only** (`alternative="greater"`, candidates pre-filtered
+to `log2FC >= MIN_LOG2FC`). It answers "what marks this cluster against all others
+pooled" and **structurally cannot report depletion.** For the complementary question
+see the next section.
+
+### Pairwise cluster contrasts vs VAF / VRC (CombinedwithVAFPaperPlots only)
+
+`cluster_pairwise_contrasts.xlsx` answers a different question from
+`cluster_marker_genes.xlsx`: for an uncharacterized cluster, what is up **and down**
+relative specifically to the VAF cluster and to the VRC cluster?
+
+Depletion is the point. A cluster lacking both Col1a1 and Pecam1 is positive
+evidence it is neither fibroblast nor endothelial, and one-vs-rest cannot show that.
+
+| | `cluster_marker_genes.xlsx` | `cluster_pairwise_contrasts.xlsx` |
+|---|---|---|
+| Comparison | one-vs-rest (all other clusters pooled) | one-vs-one, against VAF and VRC separately |
+| Test | Wilcoxon, one-sided (`greater`) | Wilcoxon, two-sided |
+| Direction | upregulated only | both, via a `direction` column |
+| Matrix | merged batch-corrected VST | merged batch-corrected VST |
+| Thresholds | `log2FC ≥ MIN_LOG2FC`, BH `padj < MAX_PADJ` | `\|log2FC\| ≥ MIN_LOG2FC`, BH `padj < MAX_PADJ` |
+
+`log2FC = mean VST(query) − mean VST(reference)`; VST differences *are* log2 fold
+changes, so no separate model is fit.
+
+**Reference clusters are re-derived every run**, never hardcoded — the modal merged
+Leiden cluster of the Clarke VAF cells and of the Clarke VRC cells respectively.
+Leiden IDs are not stable across runs whose plate roster or gene set changed, so a
+literal `VAF_CLUSTER <- 3` would silently rot.
+
+Workbook layout: one sheet per contrast named `C{query}_vs_{VAF|VRC}`, plus `Summary`
+(cell counts and up/down tallies) and `Notes` (thresholds and the reference-cluster
+assignment for that run).
+
+The block skips itself, with a logged reason, if either reference cluster cannot be
+located or if VAF and VRC cells land in the *same* cluster — that would mean the
+merged clustering does not separate them, and every contrast would be meaningless.
+Individual contrasts are skipped when either side has fewer than 3 cells.
+
+> **Check the reference-cluster purity in the log before trusting these sheets.**
+> It is printed as e.g. `VAF reference: cluster 1 (23/50 cells, 46.0%)`. The modal
+> cluster wins even by a plurality, so a low percentage means the "VAF reference"
+> is mostly *not* VAF cells and every `*_vs_VAF` sheet is baselined on a mixed
+> population. In the current run VRC is clean (43/46, 93.5%) but **VAF is only
+> 46.0%** — the Clarke VAF cells are split across clusters.
+
 ### Cluster composition bar charts
 
 4 stacked bar charts in one 2×2 PDF: counts and proportions by strain×population
@@ -398,11 +466,105 @@ Top 100 per cluster in Excel, top 15 per cluster in heatmap.
 
 ### VAF/VRC correlation (Clarke et al. 2025, GSE292898)
 
-Pearson and Spearman correlation of each cluster's mean VST profile against
-mean expression profiles of VAF, VRC, and CD45pos populations from Clarke et al.
-mouse pancreatic islet data. CD45neg cells are assigned to VAF or VRC via k-means
-clustering scored against known marker genes (Col1a1/Col1a2 for VAF;
-Pecam1/Eng/Cdh5 for VRC).
+Two distinct steps that are easy to conflate. **Marker genes are not used to
+decide a cluster's identity.**
+
+**1. Cluster → identity match: genome-wide, no marker list.** Each cluster's mean
+VST profile is correlated (Pearson *and* Spearman) against the mean profiles of
+VAF, VRC, and CD45pos, across **all shared genes — 7,772 in the merged
+analysis** (`n_genes` column in the output workbook). Both up- and
+down-regulation contribute; nothing is restricted to a marker panel. The
+correlations discriminate rather than saturating — in the current merged run
+cluster 3 is VAF 0.823 / VRC 0.592 / CD45pos 0.606, and cluster 4 is
+VAF 0.610 / VRC 0.877 / CD45pos 0.615 (Pearson, n_genes = 7,772).
+
+**2. Clarke reference labeling: unsupervised split, marker-oriented naming.**
+Which *Clarke* cells count as VAF vs VRC is decided in two stages:
+
+- the **split** is unsupervised — PCA on the top 500 variable genes, then k-means
+  with k=2, using no marker information at all;
+- the **naming** uses the marker panels (Col1a1/Col1a2/Timp3/Spp1/Thy1/Pdpn for
+  VAF; Pecam1/Eng/Cdh5/Kdr/Tie1/Vwf for VRC) *only* to decide which of the two
+  k-means clusters gets called "VAF". Orientation scores both panels
+  (VAF markers minus VRC markers) so a cluster high in both cannot win by
+  default.
+
+**Orientation runs in Clarke's own symbol space** (`vaf_cnt_mat2`, before the
+Ensembl reindexing and before any intersection with your genes). This is
+deliberate: which Clarke cluster is VAF is a Clarke-internal question and must
+not depend on which plates you have sequenced.
+
+Three bugs previously lived here, all silent:
+
+0. **Inverted orientation (the per-strain / `combined_plots` block).** The rule was
+   `if (c1_vaf_score > c2_vaf_score)` — the VAF panel alone, with the VRC scores
+   computed but never used. `Timp3` is strongly endothelial in this dataset (6.967
+   in the endothelial cluster vs 0.645 in the fibroblast cluster), so it dominated
+   the VAF panel mean and outvoted Col1a1/Col1a2. **The endothelial cluster
+   (Pecam1 5.94, Kdr 7.59, Cdh5 5.00) was labeled VAF, and every VAF/VRC
+   correlation in both workbooks came out inverted.** The old printout used
+   `max()`/`min()` per panel, so it read as self-consistent no matter which way the
+   call went and could never reveal the flip.
+1. **Symbol vs Ensembl.** The panels are symbols; the matrix had been reindexed
+   to Ensembl IDs. `intersect()` returned `character(0)`, which propagated
+   `0-row matrix → colMeans → NaN → sc1 > sc2 = NA → ifelse(NA,1,2) = NA →
+   cluster == NA → all-NA subscript`, yielding NA vectors for *both* groups.
+   `%in%` never matches NA, so **every** CD45neg Clarke cell fell through to
+   VRC. The tell in the log was `Clarke VAF cells: 96 | VRC cells: 96` for 96
+   total cells.
+2. **Intersection leakage.** Routing panels through `sym_to_ens_rev` (built from
+   `combined_expr`, the all-plate intersection) meant a marker missing from any
+   one plate became unusable. NODCD31 has **0 counts for Col1a1 and Col1a2** — a
+   pure CD31 sort contains no fibroblasts — which deleted both canonical VAF
+   markers and left a single usable gene per panel.
+
+Guards now in place, in both blocks:
+
+- orientation scores **both** panels and takes the difference (VAF minus VRC), so a
+  cluster high in endothelial markers cannot win the VAF label no matter how one
+  contaminating gene behaves;
+- hard-error below `MIN_ORIENT_MARKERS = 3` usable markers per panel — one marker is
+  a coin flip if that gene happens to be bimodal or dropout-prone;
+- hard-error on any `NA` score, rather than letting it propagate to an all-NA subscript;
+- the log prints **actual per-cluster values** and which cluster won, not `max()`/`min()`;
+- an independent **canonical-marker sanity check** (Col1a1/Col1a2 vs Pecam1/Cdh5/Kdr):
+  if the VAF cluster is not higher in collagen *and* lower in endothelial markers, it
+  emits a warning and prints `*** WARNING: canonical marker check FAILED ***`;
+- `stopifnot` that the VAF and VRC id sets partition the CD45neg cells with no NAs.
+
+Current run, all clean:
+
+```
+cluster1 (n=100): VAF panel 0.506 | VRC panel 0.178 | diff +0.328  <- VAF
+cluster2 (n=64):  VAF panel 1.169 | VRC panel 4.976 | diff -3.807  <- VRC
+sanity: collagen VAF 0.739 vs VRC 0.523 | endothelial VAF 0.149 vs VRC 6.178
+```
+
+> **Any workbook generated before this fix has VAF and VRC swapped.** Re-run rather
+> than reinterpreting old output.
+
+### Is the clustering independent of these labels?
+
+The **cluster assignment step is** unsupervised: HVG → PCA → UMAP → Leiden sees
+only expression, and population labels are attached afterward purely for
+coloring and tabulation. (Note the UMAP clusters are **Leiden**; k-means appears
+only in the Clarke labeling above.)
+
+The **matrix fed into clustering is not fully label-blind**, in three places:
+
+| Step | Label dependence |
+|---|---|
+| Per-plate size factors | Estimated from that plate's reference wells only, i.e. a population-selected subset |
+| `varianceStabilizingTransformation(blind=FALSE)` | Dispersions estimated under `~ condition` |
+| `removeBatchEffect(design = ~ condition)` (merged only) | Explicitly *preserves* condition differences so they survive batch correction |
+
+The third is the strongest: for Clarke cells `condition` is literally
+`VAF` / `VRC` / `CD45pos_MHCIIpos`, so those labels enter the design matrix that
+produces the corrected matrix the merged UMAP and Leiden clustering run on. This
+is deliberate and standard — without it `removeBatchEffect` would strip
+biological signal confounded with dataset — but it does mean the merged
+embedding is **not** independent of the VAF/VRC assignment. A change to those
+labels changes the merged clusters, not just the legend.
 
 ### CD45− MHCII+ cluster distribution sheet
 
@@ -433,7 +595,7 @@ full ranked list (713 cell types) in per-cluster sheets.
 ### CombinedwithVAFPaperPlots analysis
 
 Merges your MHCII-filtered VST data with Clarke et al. 2025 mouse cells
-(GSE292898, 117/188 cells passing MHCII filter). Clarke cells are processed
+(GSE292898, 118/188 cells passing MHCII filter). Clarke cells are processed
 through independent DESeq2 VST then **limma batch correction**
 (`removeBatchEffect`) is applied to the merged matrix before embedding.
 Clarke cells are labeled as `Clarke2025 CD45pos`, `Clarke2025 VAF`, or
@@ -458,7 +620,26 @@ merged dataset. The other 5 output folders are completely unaffected.
 | `TOP_EXCEL` | 100 | Marker genes per cluster in Excel |
 | `TOP_HEATMAP` | 15 | Marker genes per cluster in heatmap |
 | `MIN_LABEL_PROP` | 0.05 | Minimum bar segment size for label |
-| `VIOLIN_GENES` | c("Ptprc") | Genes for cluster violin plots |
+| `VIOLIN_GENES` | 18 symbols (see below) | Genes for cluster violin plots — **also exempt from every plate's low-count filter** |
+| `MIN_ORIENT_MARKERS` | 3 | Minimum markers per panel before Clarke VAF/VRC orientation will run (hard-errors below this) |
+
+`VIOLIN_GENES` is defined in the config block at the top of
+`scripts/per_strain_plots.R`, not next to the plotting code — the exemption has to
+be resolved before the strain loop runs. Symbols, not Ensembl IDs:
+
+| Group | Genes |
+|---|---|
+| CD45 purity | `Ptprc` |
+| VAF panel | `Col1a1`, `Col1a2`, `Timp3`, `Spp1`, `Thy1`, `Pdpn` |
+| VAF extras | `S100a4`, `Fn1` |
+| VRC panel | `Pecam1`, `Eng`, `Cdh5`, `Kdr`, `Tie1`, `Vwf`, `Esam` |
+| Innate sensing / MHCII TF | `Nod2`, `Ciita` |
+
+> **`Timp3` is not a usable VAF marker in this dataset.** It runs ~10× higher in the
+> endothelial (VRC) cluster than the fibroblast (VAF) cluster — 6.967 vs 0.645 —
+> despite sitting in the VAF panel. Orienting on the VAF panel alone let Timp3
+> outvote Col1a1/Col1a2 and invert the entire VAF/VRC call (see below). It is kept
+> in the list to be *plotted*, not to be read as fibroblast evidence.
 
 ---
 
@@ -500,13 +681,14 @@ python qc_summary.py --config config.yaml               # QC flagging
 
 ## Experiment-specific notes
 
-- **Plates/strains:** NOD, NOD2, B6G7, B6MHCIIGFP, NODPDL1 (`scripts/per_strain_plots.R` discovers
-  these dynamically from `data/metadata.csv` — no code changes needed to add NOD3, NOD4, etc.)
+- **Plates/strains:** NOD, NOD2, B6G7, B6MHCIIGFP, NODPDL1, NODCD31 (`scripts/per_strain_plots.R`
+  discovers these dynamically from `data/metadata.csv` — no code changes needed to add NOD3,
+  NOD4, etc.)
 - **Strain grouping:** `data/metadata.csv` has both a `strain` column (literal plate, used for
   independent per-plate normalization/DESeq2/output folders) and a `strain_group` column
   (biological grouping used for combined-analysis plots/colors). NOD-family plates (NOD, NOD2,
   NOD3, ...) share `strain_group = NOD` and are shown together by default in combined plots;
-  NODPDL1 is biologically distinct and keeps its own group.
+  NODPDL1 and NODCD31 are biologically distinct and each keep their own group.
 - **NOD2:** originally delivered mislabeled as "NODPDL1" — same biological context as NOD (a
   second, independent plate), renamed to NOD2 and relabeled `strain_group = NOD`.
 - **NODPDL1 (current):** a distinct plate/biology from NOD. Its 96 wells were originally split
@@ -519,8 +701,14 @@ python qc_summary.py --config config.yaml               # QC flagging
   (B1–E6), `CD45neg_MHCIIlo` (E7–H12)
 - **Plate quirks:** B6MHCIIGFP wells H1–H12 empty; NOD2 (formerly mislabeled NODPDL1) layout
   physically flipped but metadata labels are biologically correct
+- **NODCD31:** entirely CD45− MHCII+, with **no CD45pos_MHCIIpos wells at all** — it reuses
+  NODPDL1's 18/78 well split but sorts on CD31 instead: `CD45neg_MHCIIpos_CD31neg` (A1–B6,
+  used as that plate's normalization reference) and `CD45neg_MHCIIpos_CD31pos` (B7–H12).
+  Consequences: `Ptprc` has exactly 0 counts across all 96 cells, as do `Col1a1`/`Col1a2`
+  (a pure CD31 sort contains no fibroblasts). All three are real measurements, not QC
+  failures — see the violin-gene filter exemption above.
 - **Batches:** B6G7 and B6MHCIIGFP = batch1 (L001); NOD and NOD2 = batch2 (L002); NODPDL1 =
-  batch3 (L001+L002 merged)
+  batch3 (L001+L002 merged); NODCD31 = batch4
 - **Normalization reference:** `CD45pos_MHCIIpos` wells, per plate (well range varies by plate —
   see metadata)
 - **Contrasts:** built dynamically per plate from whichever conditions are present (3 contrasts
