@@ -70,6 +70,40 @@ UMAP_MIN_DIST    <- 0.3    # uwot: min_dist (lower = tighter clusters)
 LEIDEN_RESOLUTION <- 0.5   # Leiden resolution (higher = more clusters)
 UMAP_SEED        <- 42     # reproducibility
 
+# -- Genes plotted in the cluster violin panels --------------------------------
+# Symbols, not Ensembl IDs. Defined here (not next to the plotting code) because
+# these genes are exempted from the per-plate low-count filter further down, so
+# the list has to exist before the strain loop runs.
+#
+# WHY THE EXEMPTION: a gene with zero counts in a plate is a MEASUREMENT, not a
+# missing value — those cells genuinely express none of it, which is exactly
+# what a violin should show. But the per-plate filter (rowSums >= 10) deletes
+# such a gene from that plate's VST matrix, and combined_expr is the
+# intersection across plates, so one plate's zero deletes the gene for
+# everybody. NODCD31 is a pure CD31 sort with no fibroblasts and therefore 0
+# counts for Col1a1/Col1a2; without this exemption those genes vanish from the
+# combined and merged matrices entirely and cannot be plotted at all — not even
+# as zeros. Exempting them keeps real VST values (at the floor where counts are
+# zero) flowing through to merged_expr.
+#
+# COST: these genes are forced into each plate's DESeq2 object even when they
+# are all-zero there. Their own DE statistics on such a plate are meaningless
+# (expect NA padj), and they add a handful of genes to the multiple-testing
+# burden (~18 of ~12,000). Everything else is unaffected. Do not extend this
+# list to hundreds of genes.
+#
+# Caution on Timp3: it is ~10x HIGHER in the endothelial (VRC) cluster than the
+# fibroblast (VAF) cluster here, despite sitting in the VAF panel. Orienting on
+# the VAF panel alone let Timp3 invert the VAF/VRC call. Do not read it as a VAF
+# marker in this dataset.
+VIOLIN_GENES <- c(
+  "Ptprc",                                                      # CD45 purity
+  "Col1a1", "Col1a2", "Timp3", "Spp1", "Thy1", "Pdpn",          # VAF panel
+  "S100a4", "Fn1",                                              #   (block-1 extras)
+  "Pecam1", "Eng", "Cdh5", "Kdr", "Tie1", "Vwf", "Esam",        # VRC panel
+  "Nod2", "Ciita"                                               # innate sensing / MHCII TF
+)
+
 # -- MHCII expression filter ---------------------------------------------------
 # Cells must express BOTH H2-Aa AND H2-Ab above this VST threshold to be
 # included in DESeq2 models, UMAPs, clustering, and all downstream analyses.
@@ -182,6 +216,19 @@ cat("Applying MHCII expression filter (both", paste(MHCII_GENES, collapse=" & ")
 
 # Look up Ensembl IDs for H2-Aa and H2-Ab1
 sym_to_ens_map  <- setNames(names(sym_map), sym_map)
+
+# Ensembl IDs for the violin genes, resolved once. These are exempted from every
+# plate's low-count filter so that zero-expression cells still produce plottable
+# values rather than the gene being deleted from the matrix (see VIOLIN_GENES).
+violin_keep_ens <- unname(sym_to_ens_map[VIOLIN_GENES])
+violin_keep_ens <- violin_keep_ens[!is.na(violin_keep_ens)]
+cat("Violin genes exempt from the per-plate count filter:",
+    length(violin_keep_ens), "of", length(VIOLIN_GENES), "\n")
+if (length(violin_keep_ens) < length(VIOLIN_GENES)) {
+  cat("  No Ensembl ID for:",
+      paste(setdiff(VIOLIN_GENES, names(sym_to_ens_map)[
+        match(violin_keep_ens, sym_to_ens_map)]), collapse=", "), "\n")
+}
 mhcii_ens       <- sym_to_ens_map[MHCII_GENES]
 mhcii_ens       <- mhcii_ens[!is.na(mhcii_ens) & mhcii_ens %in% rownames(counts)]
 
@@ -538,7 +585,17 @@ for (strain in strains) {
       paste(sapply(strain_contrasts, function(x) x$name), collapse=" | "), "\n")
 
   # -- Filter low-count genes --------------------------------------------------
-  keep     <- rowSums(s_counts) >= 10
+  # Violin genes are exempted: a gene with 0 counts on this plate is a real
+  # measurement, and dropping it here would remove it from combined_expr (an
+  # intersection across plates) and therefore from merged_expr, making it
+  # unplottable everywhere rather than plottable as zeros. See VIOLIN_GENES.
+  keep     <- rowSums(s_counts) >= 10 | rownames(s_counts) %in% violin_keep_ens
+  n_forced <- sum(rownames(s_counts) %in% violin_keep_ens &
+                    rowSums(s_counts) < 10)
+  if (n_forced > 0) {
+    cat("  Retained", n_forced,
+        "low/zero-count violin gene(s) that the filter would have dropped\n")
+  }
   s_counts <- s_counts[keep, ]
   cat("Genes passing filter:", nrow(s_counts), "\n")
 
@@ -1817,18 +1874,60 @@ if (!file.exists(vaf_counts_f)) {
   c1_vrc_score <- mean(score_markers(logcpm_vaf[, c1_cells, drop=FALSE], vrc_markers))
   c2_vrc_score <- mean(score_markers(logcpm_vaf[, c2_cells, drop=FALSE], vrc_markers))
 
-  # Cluster with higher VAF score = VAF, other = VRC
-  if (c1_vaf_score > c2_vaf_score) {
+  # -- Orient the two clusters: which one is VAF? ------------------------------
+  # WAS FLIPPED. The old rule was `if (c1_vaf_score > c2_vaf_score)` — the VAF
+  # panel alone, with the VRC scores computed but never used. In this dataset
+  # Timp3 is strongly ENDOTHELIAL (6.967 in the endothelial cluster vs 0.645 in
+  # the fibroblast cluster), so it dominated the 8-gene VAF panel mean and
+  # outvoted Col1a1/Col1a2. Result: the endothelial cluster (Pecam1 5.94,
+  # Kdr 7.59, Cdh5 5.00) was labeled VAF and every VAF/VRC correlation in both
+  # workbooks came out inverted.
+  #
+  # Fix: score BOTH panels and take the difference, so a cluster high in
+  # endothelial markers cannot win the VAF label no matter how one contaminating
+  # gene behaves. This matches the orientation logic used for the merged block.
+  c1_diff <- c1_vaf_score - c1_vrc_score
+  c2_diff <- c2_vaf_score - c2_vrc_score
+  if (is.na(c1_diff) || is.na(c2_diff)) {
+    stop("VAF/VRC orientation scores are NA (c1=", c1_diff, ", c2=", c2_diff,
+         "). Refusing to label.")
+  }
+  if (c1_diff > c2_diff) {
     vaf_cells <- c1_cells; vrc_cells <- c2_cells
   } else {
     vaf_cells <- c2_cells; vrc_cells <- c1_cells
   }
   cat("  VAF cells identified:", length(vaf_cells), "\n")
   cat("  VRC cells identified:", length(vrc_cells), "\n")
-  cat("  VAF score check - VAF cluster:", round(max(c1_vaf_score, c2_vaf_score), 3),
-      "VRC cluster:", round(min(c1_vaf_score, c2_vaf_score), 3), "\n")
-  cat("  VRC score check - VRC cluster:", round(max(c1_vrc_score, c2_vrc_score), 3),
-      "VAF cluster:", round(min(c1_vrc_score, c2_vrc_score), 3), "\n")
+  # Report ACTUAL per-cluster values. The previous printout used max()/min(),
+  # which reads as self-consistent regardless of which way the call went and so
+  # could never reveal a flip.
+  cat(sprintf("  cluster1 (n=%d): VAF panel %.3f | VRC panel %.3f | diff %+.3f%s\n",
+              length(c1_cells), c1_vaf_score, c1_vrc_score, c1_diff,
+              if (identical(vaf_cells, c1_cells)) "  <- VAF" else "  <- VRC"))
+  cat(sprintf("  cluster2 (n=%d): VAF panel %.3f | VRC panel %.3f | diff %+.3f%s\n",
+              length(c2_cells), c2_vaf_score, c2_vrc_score, c2_diff,
+              if (identical(vaf_cells, c2_cells)) "  <- VAF" else "  <- VRC"))
+
+  # Independent sanity check on canonical, non-overlapping markers. If the VAF
+  # cluster is not higher in collagen and lower in Pecam1/Cdh5, something is
+  # wrong with the panels and the labels should not be trusted.
+  canon_fib  <- intersect(c("Col1a1","Col1a2"), rownames(logcpm_vaf))
+  canon_endo <- intersect(c("Pecam1","Cdh5","Kdr"), rownames(logcpm_vaf))
+  if (length(canon_fib) > 0 && length(canon_endo) > 0) {
+    fib_v <- mean(score_markers(logcpm_vaf[, vaf_cells, drop=FALSE], canon_fib))
+    fib_r <- mean(score_markers(logcpm_vaf[, vrc_cells, drop=FALSE], canon_fib))
+    end_v <- mean(score_markers(logcpm_vaf[, vaf_cells, drop=FALSE], canon_endo))
+    end_r <- mean(score_markers(logcpm_vaf[, vrc_cells, drop=FALSE], canon_endo))
+    cat(sprintf("  sanity: collagen VAF %.3f vs VRC %.3f | endothelial VAF %.3f vs VRC %.3f\n",
+                fib_v, fib_r, end_v, end_r))
+    if (!(fib_v > fib_r && end_v < end_r)) {
+      warning("VAF/VRC orientation failed the canonical marker check: the VAF ",
+              "cluster should be higher in Col1a1/Col1a2 and lower in ",
+              "Pecam1/Cdh5/Kdr. Treat all VAF/VRC output as suspect.")
+      cat("  *** WARNING: canonical marker check FAILED — labels are suspect ***\n")
+    }
+  }
 
   # -- Mean expression profiles per reference population ----------------------
   mean_vaf_ref <- rowMeans(logcpm_vaf[, vaf_cells, drop=FALSE])
@@ -2075,8 +2174,9 @@ for (strain in strains) {
 # ==============================================================================
 cat("\nGenerating combined cluster violin plots...\n")
 
-# Genes to plot - add more symbols to this vector to include additional plots
-VIOLIN_GENES <- c("Ptprc")
+# VIOLIN_GENES is defined in the config block at the top of this script, because
+# those genes must be exempted from the per-plate count filter before the strain
+# loop runs. Edit the list there, not here.
 
 # NOTE: violin genes are sourced from the PER-PLATE VST matrices
 # (all_expr_list), not from combined_expr. combined_expr is the intersection of
@@ -2294,16 +2394,71 @@ if (!file.exists(vaf_counts_f2)) {
     km_neg   <- kmeans(pca_neg$x[, 1:min(10, ncol(pca_neg$x))],
                         centers=2, nstart=25)
 
-    vaf_m <- intersect(c("Col1a1","Col1a2","Timp3","Spp1","Thy1","Pdpn"),
-                        rownames(logcpm_neg_sub))
-    vrc_m <- intersect(c("Pecam1","Eng","Cdh5","Kdr","Tie1","Vwf"),
-                        rownames(logcpm_neg_sub))
-    sc1   <- mean(colMeans(logcpm_neg_sub[vaf_m, km_neg$cluster==1, drop=FALSE]))
-    sc2   <- mean(colMeans(logcpm_neg_sub[vaf_m, km_neg$cluster==2, drop=FALSE]))
-    vaf_ids_c <- cd45neg_ids[km_neg$cluster == ifelse(sc1 > sc2, 1, 2)]
-    vrc_ids_c <- cd45neg_ids[km_neg$cluster == ifelse(sc1 > sc2, 2, 1)]
+    # -- Orientation: which k-means cluster is VAF? ---------------------------
+    # Deciding this is a CLARKE-INTERNAL question and must not depend on your
+    # gene universe. Two traps live here, both previously active:
+    #
+    # 1. SYMBOL vs ENSEMBL. logcpm_neg_sub is indexed by Ensembl ID (rownames
+    #    were replaced at the reindex step above) while the marker panels are
+    #    symbols, so intersecting them directly returned character(0). That
+    #    propagated silently: 0-row matrix -> colMeans -> mean() = NaN
+    #    -> sc1 > sc2 = NA -> ifelse(NA,1,2) = NA -> cluster == NA = all NA
+    #    -> cd45neg_ids[all-NA] = NAs for BOTH groups -> %in% never matches NA
+    #    -> every CD45neg cell fell through to "VRC". The tell in the log was
+    #    "Clarke VAF cells: 96 | VRC cells: 96" for 96 total cells.
+    #
+    # 2. INTERSECTION LEAKAGE. Routing markers through sym_to_ens_rev (built
+    #    from combined_expr, the all-plate intersection) meant a marker absent
+    #    from ANY ONE of your plates was unavailable here. NODCD31 has exactly
+    #    0 counts for Col1a1 and Col1a2 — a pure CD31 sort has no fibroblasts —
+    #    which deleted the two canonical VAF markers and left 1 usable gene per
+    #    panel. Adding a plate must never weaken the Clarke reference labeling.
+    #
+    # Fix for both: orient on Clarke's own symbol-indexed matrix (vaf_cnt_mat2,
+    # pre-Ensembl-reindexing, pre-intersection), restricted to the same cells.
+    orient_mat <- vaf_cnt_mat2[, cd45neg_ids, drop=FALSE]
+    orient_lcpm <- log1p(sweep(orient_mat, 2,
+                                pmax(colSums(orient_mat), 1), "/") * 1e6)
+
+    VAF_MARKERS <- c("Col1a1","Col1a2","Timp3","Spp1","Thy1","Pdpn")
+    VRC_MARKERS <- c("Pecam1","Eng","Cdh5","Kdr","Tie1","Vwf")
+    vaf_m <- intersect(VAF_MARKERS, rownames(orient_lcpm))
+    vrc_m <- intersect(VRC_MARKERS, rownames(orient_lcpm))
+    cat("  VAF orientation markers found:", length(vaf_m), "/",
+        length(VAF_MARKERS), "(", paste(vaf_m, collapse=","), ")\n")
+    cat("  VRC orientation markers found:", length(vrc_m), "/",
+        length(VRC_MARKERS), "(", paste(vrc_m, collapse=","), ")\n")
+
+    # Require a real panel, not a single gene — one marker is a coin flip if
+    # that gene happens to be bimodal or dropout-prone in this dataset.
+    MIN_ORIENT_MARKERS <- 3
+    if (length(vaf_m) < MIN_ORIENT_MARKERS ||
+        length(vrc_m) < MIN_ORIENT_MARKERS) {
+      stop("Too few VAF/VRC orientation markers in the Clarke matrix (VAF: ",
+           length(vaf_m), ", VRC: ", length(vrc_m), "; need >= ",
+           MIN_ORIENT_MARKERS, " each). Refusing to label — orienting on a ",
+           "near-empty panel silently misassigns entire populations.")
+    }
+
+    # Orient using BOTH panels: the VAF cluster is the one higher in VAF
+    # markers AND lower in VRC markers, so a cluster high in both cannot win.
+    sc1 <- mean(colMeans(orient_lcpm[vaf_m, km_neg$cluster==1, drop=FALSE])) -
+           mean(colMeans(orient_lcpm[vrc_m, km_neg$cluster==1, drop=FALSE]))
+    sc2 <- mean(colMeans(orient_lcpm[vaf_m, km_neg$cluster==2, drop=FALSE])) -
+           mean(colMeans(orient_lcpm[vrc_m, km_neg$cluster==2, drop=FALSE]))
+    if (is.na(sc1) || is.na(sc2)) {
+      stop("Clarke VAF/VRC orientation scores are NA (sc1=", sc1, ", sc2=", sc2,
+           "). Refusing to label.")
+    }
+    vaf_cluster <- if (sc1 > sc2) 1L else 2L
+    vaf_ids_c <- cd45neg_ids[km_neg$cluster == vaf_cluster]
+    vrc_ids_c <- cd45neg_ids[km_neg$cluster != vaf_cluster]
+    cat("  Orientation scores (VAF minus VRC) - cluster1:", round(sc1, 3),
+        "| cluster2:", round(sc2, 3), "\n")
     cat("Clarke VAF cells:", length(vaf_ids_c),
         "| VRC cells:", length(vrc_ids_c), "\n")
+    stopifnot(length(vaf_ids_c) + length(vrc_ids_c) == length(cd45neg_ids),
+              !anyNA(vaf_ids_c), !anyNA(vrc_ids_c))
   } else {
     vaf_ids_c <- cd45neg_ids
     vrc_ids_c <- character(0)
@@ -2648,6 +2803,135 @@ if (!file.exists(vaf_counts_f2)) {
   markers_m_path <- file.path(vaf_out_dir, "cluster_marker_genes.xlsx")
   saveWorkbook(wb_m, markers_m_path, overwrite=TRUE)
   cat("Saved: cluster_marker_genes.xlsx\n")
+
+  # ============================================================================
+  # Pairwise cluster contrasts vs the VAF and VRC reference clusters
+  # ============================================================================
+  # The block above is one-vs-REST and one-sided (alternative="greater", with
+  # candidates pre-filtered to log2FC >= MIN_LOG2FC). That answers "what marks
+  # this cluster against all others pooled" — which dilutes a targeted
+  # comparison and cannot report depletion at all.
+  #
+  # This block answers the different question: for an uncharacterized cluster,
+  # what is up AND down relative specifically to the VAF cluster and to the VRC
+  # cluster? Depletion matters here — a cluster lacking both Col1a1 and Pecam1
+  # is evidence it is neither fibroblast nor endothelial, and the one-vs-rest
+  # output structurally cannot show that.
+  cat("\nRunning pairwise cluster contrasts vs VAF / VRC reference clusters...\n")
+
+  # -- Identify the reference clusters from Clarke cell membership -------------
+  # Derived each run rather than hardcoded: Leiden cluster IDs are not stable
+  # across runs whose plate roster or gene set changed, so a literal
+  # "VAF_CLUSTER <- 3" would silently rot.
+  modal_cluster <- function(ids, label) {
+    ids <- intersect(ids, names(cluster_vec_m))
+    if (length(ids) == 0) return(NA_character_)
+    tb <- table(cluster_vec_m[ids])
+    winner <- names(tb)[which.max(tb)]
+    cat(sprintf("  %s reference: cluster %s (%d/%d cells, %.1f%%)\n",
+                label, winner, max(tb), length(ids),
+                100 * max(tb) / length(ids)))
+    winner
+  }
+  vaf_ref_cl <- modal_cluster(vaf_ids_c, "VAF")
+  vrc_ref_cl <- modal_cluster(vrc_ids_c, "VRC")
+
+  if (is.na(vaf_ref_cl) || is.na(vrc_ref_cl)) {
+    cat("  Could not locate VAF/VRC reference clusters — skipping pairwise.\n")
+  } else if (vaf_ref_cl == vrc_ref_cl) {
+    cat("  WARNING: VAF and VRC reference cells share cluster", vaf_ref_cl,
+        "- the merged clustering does not separate them. Skipping pairwise.\n")
+  } else {
+    wb_pw <- createWorkbook()
+    pw_summary <- data.frame(
+      contrast=character(), n_query=integer(), n_reference=integer(),
+      n_up=integer(), n_down=integer(), stringsAsFactors=FALSE)
+
+    # Every cluster except the reference itself, tested against each reference.
+    refs <- c(VAF=vaf_ref_cl, VRC=vrc_ref_cl)
+    for (ref_name in names(refs)) {
+      ref_cl <- refs[[ref_name]]
+      for (q_cl in as.character(cluster_levels_m)) {
+        if (q_cl == ref_cl) next
+        q_cells <- names(cluster_vec_m)[cluster_vec_m == q_cl]
+        r_cells <- names(cluster_vec_m)[cluster_vec_m == ref_cl]
+        if (length(q_cells) < 3 || length(r_cells) < 3) {
+          cat("    Cluster", q_cl, "vs", ref_name, "- too few cells, skipped\n")
+          next
+        }
+
+        mean_q <- rowMeans(merged_expr[, q_cells, drop=FALSE])
+        mean_r <- rowMeans(merged_expr[, r_cells, drop=FALSE])
+        l2fc   <- mean_q - mean_r          # VST difference == log2 fold change
+
+        # Two-sided, and NOT pre-filtered by direction: keep any gene with a
+        # meaningful shift either way so depletion survives to the output.
+        cand <- names(l2fc)[abs(l2fc) >= MIN_LOG2FC]
+        if (length(cand) < 2) {
+          cat("    Cluster", q_cl, "vs", ref_name, "- no candidate genes\n")
+          next
+        }
+        pv <- sapply(cand, function(g)
+                wilcox.test(merged_expr[g, q_cells], merged_expr[g, r_cells],
+                            exact=FALSE)$p.value)          # two-sided
+        pa <- p.adjust(pv, method="BH")
+
+        res_pw <- data.frame(
+          ensembl_id       = cand,
+          gene_symbol      = to_sym(cand),
+          mean_VST_query   = round(mean_q[cand], 4),
+          mean_VST_ref     = round(mean_r[cand], 4),
+          log2FC           = round(l2fc[cand], 4),
+          direction        = ifelse(l2fc[cand] > 0, "up_in_query",
+                                                    "down_in_query"),
+          pval             = signif(pv, 4),
+          padj             = signif(pa, 4),
+          stringsAsFactors = FALSE) %>%
+          filter(padj < MAX_PADJ) %>%
+          arrange(desc(abs(log2FC))) %>%
+          distinct(gene_symbol, .keep_all=TRUE)
+
+        n_up   <- sum(res_pw$direction == "up_in_query")
+        n_down <- sum(res_pw$direction == "down_in_query")
+        cat(sprintf("    Cluster %s vs %s (cluster %s): %d up, %d down\n",
+                    q_cl, ref_name, ref_cl, n_up, n_down))
+
+        sn_pw <- paste0("C", q_cl, "_vs_", ref_name)
+        addWorksheet(wb_pw, sn_pw)
+        writeData(wb_pw, sn_pw, res_pw)
+        addStyle(wb_pw, sn_pw,
+                 style=createStyle(textDecoration="bold", fgFill="#D9E1F2"),
+                 rows=1, cols=1:8, gridExpand=TRUE)
+        setColWidths(wb_pw, sn_pw, cols=1:8,
+                     widths=c(20,16,16,14,10,14,12,12))
+        pw_summary <- rbind(pw_summary, data.frame(
+          contrast=sn_pw, n_query=length(q_cells), n_reference=length(r_cells),
+          n_up=n_up, n_down=n_down, stringsAsFactors=FALSE))
+      }
+    }
+
+    notes_pw <- data.frame(Note=c(
+      paste0("Pairwise Wilcoxon contrasts on merged batch-corrected VST. ",
+             "Two-sided; both enrichment and depletion reported."),
+      paste0("VAF reference = cluster ", vaf_ref_cl,
+             "; VRC reference = cluster ", vrc_ref_cl,
+             " (assigned from Clarke 2025 cell membership this run)."),
+      paste0("log2FC = mean VST(query) - mean VST(reference). ",
+             "Positive = up in query cluster."),
+      paste0("Thresholds: |log2FC| >= ", MIN_LOG2FC, ", BH padj < ", MAX_PADJ, "."),
+      paste0("Cluster IDs are re-derived every run and are NOT comparable ",
+             "across runs with a different plate roster or gene set."),
+      paste0("Distinct from cluster_marker_genes.xlsx, which is one-vs-rest ",
+             "and upregulated-only.")), stringsAsFactors=FALSE)
+    addWorksheet(wb_pw, "Notes");   writeData(wb_pw, "Notes", notes_pw)
+    setColWidths(wb_pw, "Notes", cols=1, widths=110)
+    addWorksheet(wb_pw, "Summary"); writeData(wb_pw, "Summary", pw_summary)
+    setColWidths(wb_pw, "Summary", cols=1:5, widths=c(18,10,14,8,8))
+
+    saveWorkbook(wb_pw, file.path(vaf_out_dir, "cluster_pairwise_contrasts.xlsx"),
+                 overwrite=TRUE)
+    cat("Saved: cluster_pairwise_contrasts.xlsx\n")
+  }
 
   # -- Heatmap -----------------------------------------------------------------
   cat("Generating merged cluster marker heatmap...\n")
