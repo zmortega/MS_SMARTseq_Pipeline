@@ -43,11 +43,17 @@ FASTQ (R1/R2 per cell)
         │       ├── Cell identity Excel (CellMarker 2.0 gene set scoring)
         │       ├── VAF/VRC correlation Excel (Clarke et al. 2025, GSE292898)
         │       └── MCA cell type correlation Excel (Mouse Cell Atlas)
-        └── Combined + Clarke 2025 analysis (your cells + Clarke et al. mouse data)
-                ├── Same outputs as combined analysis above
-                ├── Pairwise cluster contrasts vs VAF / VRC (two-sided, up + down)
-                ├── limma batch correction applied before embedding
-                └── Clarke cells treated as additional strain "Clarke2025"
+        ├── Combined + Clarke 2025 analysis (your cells + Clarke et al. mouse data)
+        │       ├── Same outputs as combined analysis above
+        │       ├── Pairwise cluster contrasts vs VAF / VRC (two-sided, up + down)
+        │       ├── limma batch correction applied before embedding
+        │       └── Clarke cells treated as additional strain "Clarke2025"
+        └── NoMHCIIFilter analysis (all sorted cells, MHCII filter bypassed,
+                    depth floor only)
+                ├── Per-cell lineage typing (curated marker panels)
+                ├── UMAP colored by cell type
+                ├── Violins of genes of interest within focus cell types
+                └── Per-cell expression workbook + all-genes CSVs
 ```
 
 ---
@@ -218,6 +224,12 @@ results/
 │       ├── cell_identity_merged_clusters.xlsx
 │       ├── VAF_VRC_correlation_merged_clusters.xlsx
 │       └── MCA_celltype_correlation_merged_clusters.xlsx
+│   └── NoMHCIIFilter/
+│       ├── umap_all454_by_cell_type.pdf               (cell count is derived)
+│       ├── violin_GOI_by_cell_type.pdf
+│       ├── GOI_expression_by_cell.xlsx
+│       ├── expression_all_genes_by_cell_VST.csv
+│       └── expression_all_genes_by_cell_counts.csv
 └── qc_summary/
     ├── cell_qc_metrics.csv
     ├── cell_qc_barplots.pdf
@@ -592,6 +604,154 @@ the clustifyrdata package. Downloaded as a single `.rda` file at runtime,
 cached to `/tmp/ref_MCA.rda`. Top 5 matches per cluster in Summary sheet;
 full ranked list (713 cell types) in per-cluster sheets.
 
+### NoMHCIIFilter analysis
+
+Unsupervised clustering of every sorted cell with the MHCII expression filter
+bypassed entirely. Answers "what structure is there across everything I
+sorted?", independent of the MHCII gate that defines every other folder.
+
+**"No MHCII filter" is literal, and is the only biological gate removed.** One
+quality gate is still applied: a sequencing-depth floor of `NOFILT_MIN_GENES`
+(default **500 genes detected**, mirroring `MIN_GENES_DETECTED` in
+`config.yaml`). That is a data-quality criterion, not a biological one — no cell
+is included or excluded here on the basis of what it expresses. 564 sorted →
+**454 analyzed**, 110 removed.
+
+The method is deliberately **identical** to the `combined_plots` UMAP so the two
+are directly comparable — per-plate low-count filter (violin-gene exemption
+included) → per-plate DESeq2 with size factors from that plate's own reference
+wells → VST → intersect genes across plates → top `N_HVG` by variance → PCA →
+UMAP for layout, plus a separate all-gene PCA → kNN → Leiden for the cluster
+assignment. Same tuning constants, same seed. **The only difference is which
+cells go in.**
+
+| | `combined_plots` | `NoMHCIIFilter` |
+|---|---|---|
+| Gate | MHCII expression | sequencing depth only |
+| Cells | 351 | 454 |
+| Genes in intersection | 8,948 | 12,049 |
+| Leiden clusters | 3 | 3 |
+
+The gene intersection is *larger* here despite the same filter rule: more cells
+per plate means more genes clear `rowSums >= 10`.
+
+Cells removed by the depth floor, per plate: B6G7 15, B6MHCIIGFP 20, NOD 23,
+NOD2 30, NODCD31 15, NODPDL1 7. The loss is concentrated in the CD45− MHCIIhi /
+MHCIIlo subgates and in NODCD31's CD31+ block; a full plate × condition
+breakdown is printed to the log every run.
+
+Outputs:
+
+| File | Contents |
+|---|---|
+| `violin_GOI_by_cell_type.pdf` | Violins of `NF_GENES_OF_INTEREST` within `NF_FOCUS_TYPES`, with n and detection count on each axis label |
+| `GOI_expression_by_cell.xlsx` | Genes of interest quantified per cell (6 sheets, below) |
+| `expression_all_genes_by_cell_VST.csv` | All genes × all passing cells, VST — for drilling into any other gene |
+| `expression_all_genes_by_cell_counts.csv` | Same matrix, raw counts — for checking whether a gene is detected at all |
+| `umap_all{N}_by_cell_type.pdf` | UMAP colored by per-cell type; cell count derived at runtime |
+
+Workbook sheets: `GOI_by_cell_long` (one row per gene × cell: VST, raw count,
+CPM, detected, cell type), `GOI_genes_x_cells_VST` (literal genes × cells matrix
+with a `CELL_TYPE` header row), `Summary_by_cell_type`, `Cell_annotations`,
+`Panel_definitions`, `Notes`. The CSV columns are `cell_id`, matching
+`Cell_annotations` — take a cell ID from the workbook, look up any gene in the CSV.
+
+#### Per-cell type assignment
+
+**Every cell gets its own label. This does not come from clustering.**
+Fibroblasts are ~5% of cells and never form their own Leiden cluster here, so a
+cluster-level label cannot produce a fibroblast group at all.
+
+Method, in order:
+
+1. Raw counts for the passing cells — **all genes, deliberately not `nf_expr`**
+2. `log1p(CPM)` per cell
+3. Z-score each gene across the cells (zero-variance genes drop; ~27,600 remain)
+4. Score each panel per cell = mean z-score of that panel's genes
+5. Label = highest-scoring panel; `margin` = top minus runner-up
+
+> **Why step 1 says "not `nf_expr`".** `nf_expr` is the cross-plate intersection,
+> so one plate's honest zero deletes a gene for every plate. NODCD31 is a pure
+> CD31 sort with no fibroblasts and therefore 0 counts for Col1a1/Col1a2 —
+> scoring on `nf_expr` resolved the **fibroblast panel to 2 of 10 markers and
+> pericyte to 0 of 7**, silently mistyping the exact population the analysis is
+> about. Which lineage a cell belongs to is a property of that cell and must not
+> depend on which other plates were sequenced. Same failure mode as the Clarke
+> VAF/VRC orientation bug above. The script now hard-errors if a panel named in
+> `NF_FOCUS_TYPES` resolves to fewer than 3 markers.
+
+**Marker provenance — read before publishing.** These panels are conventional
+textbook lineage markers, assembled by hand. They are **not** taken from a
+database or a citable source. Some overlap the repo's pre-existing fallback
+`cell_db` (endothelial, pericyte) but the fibroblast, endocrine and
+acinar/ductal panels are largely independent of it, so the repo now holds two
+non-identical definitions of "fibroblast". For anything going into a figure,
+replace them with a panel from a reference you trust, or cite deliberately.
+
+> **More markers is not automatically better.** The score is a *mean*, so every
+> marker carries weight 1/n and **a marker below the panel average drags the
+> score down**. Measured on this dataset, adding to the fibroblast panel:
+> `Col6a1` z=3.07 raises the mean 2.66→2.70 (kept); `Fap` z=1.38 lowers it to
+> 2.55; `S100a4` z=0.29 lowers it to 2.45. `Fap` looks specific (3% elsewhere)
+> but is detected in only 26% of fibroblasts — it marks *activated* fibroblasts,
+> not fibroblasts. `Vim` is detected in 83% of fibroblasts and 53% of everything
+> else, so it barely discriminates. If you want large panels to behave the way
+> intuition expects, switch to rank-based scoring (UCell/AUCell-style), which is
+> insensitive to panel size and dropout.
+
+> **The fibroblast/pericyte boundary is genuinely fuzzy** — 56 cells have
+> Fibroblast as runner-up, the closest pericytes at gaps of 0.025–0.031. Both
+> are mesenchymal and pericytes express collagens. Endothelial and hematopoietic
+> have 1 ambiguous cell each by comparison. Do not treat the fibroblast/pericyte
+> split as sharp regardless of panel.
+
+Cells whose top score beats the runner-up by less than `NF_AMBIGUOUS_MARGIN`
+(0.25) are flagged `ambiguous`. **They are still counted in their top type** —
+the flag exists so borderline cells can be excluded when it matters, not so they
+are silently trusted. There is no "unassigned" class and no threshold on the
+absolute score: every cell gets an argmax label regardless of how weak the
+evidence is.
+
+#### Legacy cluster-centric outputs
+
+The earlier Leiden-cluster path (cluster UMAP, marker heatmap,
+`cluster_lineage_calls.xlsx`, CellMarker and MCA workbooks per cluster) is kept,
+not deleted. Set `NF_RUN_CLUSTER_OUTPUTS <- TRUE` to restore it. It is off by
+default because its Wilcoxon loops and MCA download dominate this section's
+runtime, and the per-cell typing supersedes it.
+
+**Additive by construction.** The section runs last, reads only `counts_all` /
+`meta_all` (snapshotted immediately before the MHCII filter overwrites `counts`
+/ `meta`), writes only to `results/05_dge/NoMHCIIFilter/`, and assigns nothing
+any earlier section reads. Verified: adding it left every prior figure identical
+— 8,948 common genes, 351 combined cells, 3 combined clusters, Clarke VAF 50 /
+VRC 46, 4 merged clusters, all unchanged.
+
+#### Why the depth floor is not optional here
+
+Removing the MHCII filter also removes the depth screen it was incidentally
+performing. Running with no floor at all (`NOFILT_MIN_GENES <- 0`) was tried
+first and produced two concrete failures:
+
+1. **A pure artifact cluster.** All 564 cells gave **6** clusters, and cluster 6
+   (n=29) sat alone at UMAP1 ≈ 17, far off the main manifold — shallow cells
+   clustering by library size rather than by biology. The shallowest cell in the
+   dataset detects **51 genes on 101 reads**. With the floor applied the island
+   disappears and the structure resolves to 3 clean clusters.
+2. **Collapsed size factors.** The per-plate estimator uses genes nonzero in
+   *every* reference well, so a single near-empty reference well guts it. With
+   no floor: B6G7 251 genes, NODPDL1 41, NODCD31 21, NOD 18, B6MHCIIGFP **4**,
+   NOD2 **3**. Normalization at 3 genes is meaningless.
+
+> **The floor improves this but does not fully fix it.** After filtering:
+> NOD2 349, NODPDL1 260, B6G7 251 — but B6MHCIIGFP 122, NOD 107, NODCD31 57,
+> all still tripping the `*** WARNING ***` that fires below 200. The residual
+> cause is structural rather than depth: "nonzero in *every* reference well" is
+> a strict criterion when a plate has only 6–15 reference wells left. Treat
+> cross-plate comparisons in this folder with corresponding caution. The
+> filtered analyses are unaffected — they retain more reference wells because
+> the MHCII filter removed the shallow ones for different reasons.
+
 ### CombinedwithVAFPaperPlots analysis
 
 Merges your MHCII-filtered VST data with Clarke et al. 2025 mouse cells
@@ -601,6 +761,52 @@ through independent DESeq2 VST then **limma batch correction**
 Clarke cells are labeled as `Clarke2025 CD45pos`, `Clarke2025 VAF`, or
 `Clarke2025 VRC`. All combined_plots outputs are reproduced for this
 merged dataset. The other 5 output folders are completely unaffected.
+
+---
+
+## Which analyses run
+
+`scripts/per_strain_plots.R` has four switches near the top. Turning the first
+two off takes a full run from **~15 min to 11 min 25 s** (measured, clean run,
+all six plates).
+
+That is a real but modest win, and worth being clear about why: most of the
+remaining time is work the flags *cannot* skip — the six per-plate DESeq2/VST
+fits are mandatory (see the dependency table below), and the Wilcoxon loops in
+the two enabled folders are themselves expensive (NoMHCIIFilter cluster 1 alone
+tests ~9,500 candidate genes, and the merged pairwise contrasts run six
+two-sided comparisons over ~7,800 genes). Getting substantially below this
+needs caching the per-plate VST matrices to disk, not more flags.
+
+```r
+RUN_PER_STRAIN_PLOTS <- FALSE   # results/05_dge/<STRAIN>_plots/
+RUN_COMBINED_PLOTS   <- FALSE   # results/05_dge/combined_plots/
+RUN_VAF_MERGED       <- TRUE    # results/05_dge/CombinedwithVAFPaperPlots/
+RUN_NOMHCIIFILTER    <- TRUE    # results/05_dge/NoMHCIIFilter/
+```
+
+Nothing is deleted — flip a flag back to `TRUE` to restore that output exactly
+as before.
+
+> **`RUN_COMBINED_PLOTS = FALSE` skips the `combined_plots` folder, not the
+> combined matrix it is named after.** Several things inside those sections are
+> consumed by the analyses that are still on, so they run regardless of the
+> flags:
+>
+> | Still runs | Why |
+> |---|---|
+> | The per-strain DESeq2/VST loop | Builds `all_expr_list` / `all_meta_list` → `combined_expr` + `combined_meta`, which CombinedwithVAFPaperPlots consumes. Only the loop's plots and spreadsheets are skipped, never its arithmetic. |
+> | `combined_meta$strain_condition` | The merged metadata is built from it |
+> | `strain_base_colors`, `sc_palette` | The merged UMAP and bar charts extend these palettes |
+> | `MIN_LABEL_PROP` | Used by the merged bar charts |
+> | `ref_profiles` (Clarke VAF/VRC/CD45pos means) | The merged VAF/VRC correlation reuses them |
+> | CellMarker DB, `score_cluster`, `universe_size` | Merged and NoMHCIIFilter both score against them |
+> | `sym_to_ens`, the openxlsx/ComplexHeatmap block, `HT_RASTER_DEVICE` | Used throughout |
+>
+> The gates are placed *around* these, so the shared work happens and only the
+> output-writing is skipped. If you gate a new section, check for this class of
+> dependency first — the failure mode is a mid-run `object '<x>' not found`
+> after several minutes of successful work.
 
 ---
 
@@ -622,6 +828,13 @@ merged dataset. The other 5 output folders are completely unaffected.
 | `MIN_LABEL_PROP` | 0.05 | Minimum bar segment size for label |
 | `VIOLIN_GENES` | 18 symbols (see below) | Genes for cluster violin plots — **also exempt from every plate's low-count filter** |
 | `MIN_ORIENT_MARKERS` | 3 | Minimum markers per panel before Clarke VAF/VRC orientation will run (hard-errors below this) |
+| `NOFILT_MIN_GENES` | 500 | Depth floor for the **NoMHCIIFilter** analysis only — minimum genes detected per cell. Mirrors `MIN_GENES_DETECTED` in `config.yaml` (kept in sync by hand; this script does not parse the YAML). Set to 0 to disable. |
+| `NF_GENES_OF_INTEREST` | c("Nod2", "Ciita") | Genes quantified per cell and plotted as violins in **NoMHCIIFilter** |
+| `NF_FOCUS_TYPES` | c("Endothelial", "Fibroblast") | Cell types the violins focus on; must match `names(NF_LINEAGE_PANELS)`. A focus panel resolving to <3 markers is a hard error |
+| `NF_AMBIGUOUS_MARGIN` | 0.25 | Below this top-vs-runner-up gap a cell is flagged `ambiguous` (still counted in its top type) |
+| `NF_LINEAGE_PANELS` | 6 curated panels | Marker panels used for per-cell typing. See the provenance warning above before publishing |
+| `NF_RUN_CLUSTER_OUTPUTS` | FALSE | Restore the legacy Leiden-cluster outputs in NoMHCIIFilter |
+| `NF_VIOLIN_GENES` | c("Ciita", "Nod2") | Legacy cluster-violin path only |
 
 `VIOLIN_GENES` is defined in the config block at the top of
 `scripts/per_strain_plots.R`, not next to the plotting code — the exemption has to
@@ -649,11 +862,21 @@ Auto-installed by the script if missing:
 `igraph`, `uwot`, `BiocManager`, `openxlsx`, `ComplexHeatmap`, `circlize`,
 `RColorBrewer`, `limma`, `remotes`
 
-Manual install recommended before first run:
+Manual install required before first run — these are loaded with a bare
+`library()` and will hard-fail the run if absent:
 ```r
-install.packages(c("ggplot2", "ggrepel", "dplyr", "tidyr", "patchwork", "scales"))
+install.packages(c("ggplot2", "ggrepel", "dplyr", "tidyr", "patchwork",
+                   "scales", "ragg"))
 BiocManager::install("DESeq2")
 ```
+
+**`ragg` and heatmap rendering.** The heatmaps use `use_raster=TRUE`, which needs
+a working bitmap device to write a temp PNG. ComplexHeatmap defaults to
+`grDevices::png()`, which on macOS routes through cairo/X11 — on a machine
+without XQuartz that fails at `draw()` time with an opaque
+`unable to open .heatmap_body_*.png` and kills the run *after* most outputs are
+already written. `ragg::agg_png` is self-contained, so the script prefers it via
+`HT_RASTER_DEVICE` and falls back to the stock device when `ragg` is absent.
 
 ---
 
