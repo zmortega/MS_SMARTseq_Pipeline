@@ -1,11 +1,16 @@
 Warning messages:
-1: package ‘DESeq2’ was built under R version 4.4.3 
-2: package ‘matrixStats’ was built under R version 4.4.3 
-3: package ‘ggrepel’ was built under R version 4.4.3 
-4: package ‘dplyr’ was built under R version 4.4.3 
-5: package ‘tidyr’ was built under R version 4.4.3 
+1: package ‘DESeq2’ was built under R version 4.5.2 
+2: package ‘S4Vectors’ was built under R version 4.5.2 
+3: package ‘BiocGenerics’ was built under R version 4.5.2 
+4: package ‘IRanges’ was built under R version 4.5.2 
+5: package ‘GenomicRanges’ was built under R version 4.5.2 
+6: package ‘Seqinfo’ was built under R version 4.5.2 
+7: package ‘SummarizedExperiment’ was built under R version 4.5.2 
+8: package ‘MatrixGenerics’ was built under R version 4.5.2 
+9: package ‘Biobase’ was built under R version 4.5.3 
+10: package ‘ggrepel’ was built under R version 4.5.2 
 Warning message:
-package ‘Matrix’ was built under R version 4.4.3 
+package ‘igraph’ was built under R version 4.5.2 
 Removed old results/05_dge/
 Created fresh results/05_dge/
 
@@ -14,8 +19,7 @@ Total cells in metadata:     564
 
   Metadata aligned to count matrix column order: 564 cells
 
-Building symbol map from GTF (one-time, ~30s)...
-Symbol map built: 56941 genes
+Symbol map loaded: 56941 entries
 
 Applying MHCII expression filter (both H2-Aa & H2-Ab1 >= VST 1 )...
 Violin genes exempt from the per-plate count filter: 18 of 18 
@@ -62,52 +66,8 @@ converting counts to integer mode
 Reference cells for size factor estimation: 5 
 Size factors (summary):
    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
-0.00767 0.52220 1.35977 1.27217 1.69409 4.02683 
+0.00767 0.52220 1.35978 1.27217 1.69409 4.02683 
 DESeq2 complete.
-Writing expression matrix...
-Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/expression_matrix_B6G7.csv 
-
-  -- UMAPs --
-  Highly variable genes selected: 2000 
-  Running UMAP (all cells)...
-    PCs selected: 32 (80.9% variance explained)
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/umap_B6G7_all_by_population.pdf 
-  Running UMAP (CD45neg cells, n=54)...
-    PCs selected: 28 (80.1% variance explained)
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/umap_B6G7_cd45neg_by_population.pdf 
-  Running Leiden clustering (resolution=0.5)...
-  Clusters found: 2 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/umap_B6G7_cd45neg_by_cluster.pdf 
-
-  -- Per-strain UMAP --
-  Running UMAP (HVGs)...
-    PCs selected: 32 (80.9% variance explained)
-  Cells: 59 | Leiden resolution: 0.8 | n_neighbors: 9 
-  Running Leiden clustering on UMAP coordinates...
-  Clusters found: 4 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/umap_B6G7_by_cluster.pdf 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/umap_B6G7_by_population.pdf 
-
-  -- CD45+ MHCIIpos vs CD45- MHCIIhi --
-  Significant DEGs: 967 
-  Top 20 genes: Cyc1, Anp32b, Pip4p1, Irak1, Ehmt2, Gm13461, Rab11b-ps2, Ndufs8, Eif3m, Relb, Tpp2, Klhdc3, Clpx, Aldh3a2, Hsdl2, Mettl7a1, Ercc5, Acvr1, Arntl, Gdf9 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/volcano_B6G7_CD45pos_vs_MHCIIhi.pdf 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/violins_B6G7_CD45pos_vs_MHCIIhi.pdf 
-
-  -- CD45+ MHCIIpos vs CD45- MHCIIlo --
-  Significant DEGs: 912 
-  Top 20 genes: Cyc1, Anp32b, Pip4p1, Ehmt2, Rab11b-ps2, Gm13461, Cetn3, Gm6201, Relb, Eif3m, Akr1b10, Mtpap, Ripk3, Abcf1, Rnmt, Casp6, Abhd15, Dgcr6, Smox, Dynlt3 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/volcano_B6G7_CD45pos_vs_MHCIIlo.pdf 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/violins_B6G7_CD45pos_vs_MHCIIlo.pdf 
-
-  -- CD45- MHCIIhi vs CD45- MHCIIlo --
-  Significant DEGs: 241 
-  Top 20 genes: Tuba4a, Lyar, Mmd, Ing2, Uchl5, Letmd1, Pex11b, Cisd1, Ano10, Rsl24d1, Nup43, Tpp2, Atp11a, Il15, Ttc13, Cpsf4, Zfp866, Crls1, 4833411C07Rik, Pcgf3 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/volcano_B6G7_MHCIIhi_vs_MHCIIlo.pdf 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/violins_B6G7_MHCIIhi_vs_MHCIIlo.pdf 
-
- B6G7 complete. 10 files written to: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots 
-
 ==============================================================
 Strain: B6MHCIIGFP 
 ==============================================================
@@ -127,50 +87,6 @@ Size factors (summary):
      Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
  0.004615  0.056613  1.241613  4.176744  6.086856 21.102711 
 DESeq2 complete.
-Writing expression matrix...
-Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/expression_matrix_B6MHCIIGFP.csv 
-
-  -- UMAPs --
-  Highly variable genes selected: 2000 
-  Running UMAP (all cells)...
-    PCs selected: 13 (80.4% variance explained)
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/umap_B6MHCIIGFP_all_by_population.pdf 
-  Running UMAP (CD45neg cells, n=30)...
-    PCs selected: 12 (82.1% variance explained)
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/umap_B6MHCIIGFP_cd45neg_by_population.pdf 
-  Running Leiden clustering (resolution=0.5)...
-  Clusters found: 2 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/umap_B6MHCIIGFP_cd45neg_by_cluster.pdf 
-
-  -- Per-strain UMAP --
-  Running UMAP (HVGs)...
-    PCs selected: 13 (80.4% variance explained)
-  Cells: 34 | Leiden resolution: 0.6 | n_neighbors: 5 
-  Running Leiden clustering on UMAP coordinates...
-  Clusters found: 4 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/umap_B6MHCIIGFP_by_cluster.pdf 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/umap_B6MHCIIGFP_by_population.pdf 
-
-  -- CD45+ MHCIIpos vs CD45- MHCIIhi --
-  Significant DEGs: 210 
-  Top 20 genes: Snrpb, Pkm, Hnrnpf, Pitpna, Trafd1, Hint1, Pafah1b1, Mapkapk2, Lamtor1, Ech1, Arhgap25, S1pr1, Tor1a, Kcnk13, Gm5555, Dnaja2, Hyal2, Clstn1, Ece1, Hdac7 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/volcano_B6MHCIIGFP_CD45pos_vs_MHCIIhi.pdf 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/violins_B6MHCIIGFP_CD45pos_vs_MHCIIhi.pdf 
-
-  -- CD45+ MHCIIpos vs CD45- MHCIIlo --
-  Significant DEGs: 361 
-  Top 20 genes: Snrpb, Tspo, Hint1, Pkm, Gpx4-ps2, Lifr, Pitpna, Trafd1, Hnrnpf, Rnh1, Pef1, Sin3a, Btbd1, Ccny, Il21r, Uggt1, Aamp, A630001G21Rik, Bok, Actr3 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/volcano_B6MHCIIGFP_CD45pos_vs_MHCIIlo.pdf 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/violins_B6MHCIIGFP_CD45pos_vs_MHCIIlo.pdf 
-
-  -- CD45- MHCIIhi vs CD45- MHCIIlo --
-  Significant DEGs: 188 
-  Top 20 genes: Btbd1, Pef1, Sin3a, Il21r, Lpxn, Uggt1, Ccdc97, Pdia4, Mdp1, Jak1, Cavin2, Fermt2, Ak3, Igtp, Adgrg6, Thsd7a, Mtpap, S100a16, Usp21, Oat 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/volcano_B6MHCIIGFP_MHCIIhi_vs_MHCIIlo.pdf 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/violins_B6MHCIIGFP_MHCIIhi_vs_MHCIIlo.pdf 
-
- B6MHCIIGFP complete. 10 files written to: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots 
-
 ==============================================================
 Strain: NOD 
 ==============================================================
@@ -189,50 +105,6 @@ Size factors (summary):
    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
 0.04877 2.26837 3.12801 3.42513 4.53107 9.04668 
 DESeq2 complete.
-Writing expression matrix...
-Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/expression_matrix_NOD.csv 
-
-  -- UMAPs --
-  Highly variable genes selected: 2000 
-  Running UMAP (all cells)...
-    PCs selected: 41 (80.2% variance explained)
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/umap_NOD_all_by_population.pdf 
-  Running UMAP (CD45neg cells, n=67)...
-    PCs selected: 39 (80.7% variance explained)
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/umap_NOD_cd45neg_by_population.pdf 
-  Running Leiden clustering (resolution=0.5)...
-  Clusters found: 3 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/umap_NOD_cd45neg_by_cluster.pdf 
-
-  -- Per-strain UMAP --
-  Running UMAP (HVGs)...
-    PCs selected: 41 (80.2% variance explained)
-  Cells: 73 | Leiden resolution: 0.8 | n_neighbors: 12 
-  Running Leiden clustering on UMAP coordinates...
-  Clusters found: 4 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/umap_NOD_by_cluster.pdf 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/umap_NOD_by_population.pdf 
-
-  -- CD45+ MHCIIpos vs CD45- MHCIIhi --
-  Significant DEGs: 306 
-  Top 20 genes: Slc44a2, Cd24a, Sirt7, Sorbs2, Col18a1, Ets2, Thbs1, Lonp2, Fbxw2, Chst15, Rcl1, Hsd11b1, Ccn5, Gm10925, Ebi3, mt-Atp6, Sash3, mt-Rnr1, Gm13340, Gm28661 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/volcano_NOD_CD45pos_vs_MHCIIhi.pdf 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/violins_NOD_CD45pos_vs_MHCIIhi.pdf 
-
-  -- CD45+ MHCIIpos vs CD45- MHCIIlo --
-  Significant DEGs: 267 
-  Top 20 genes: Slc44a2, Sirt7, Cd24a, Sorbs2, Ets2, Lonp2, Fbxw2, Thbs1, Ephx1, Chst15, Tmem17, Ebi3, Wdr4, H2bc6, mt-Nd4l, Gm10925, mt-Atp6, Rpl19, Rps7, Ccdc43 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/volcano_NOD_CD45pos_vs_MHCIIlo.pdf 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/violins_NOD_CD45pos_vs_MHCIIlo.pdf 
-
-  -- CD45- MHCIIhi vs CD45- MHCIIlo --
-  Significant DEGs: 36 
-  Top 20 genes: Terf2ip, Cars, Ift140, Rtl6, Nr0b2, Tmem17, Wdr4, Asb2, Pi4kb, Sh2d3c, Sash3, Ighg2b, Ccn5, Rcl1, Hsd11b1, Gm28438, Gm28439, mt-Atp8, mt-Rnr2, mt-Nd1 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/volcano_NOD_MHCIIhi_vs_MHCIIlo.pdf 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/violins_NOD_MHCIIhi_vs_MHCIIlo.pdf 
-
- NOD complete. 10 files written to: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots 
-
 ==============================================================
 Strain: NOD2 
 ==============================================================
@@ -252,50 +124,6 @@ Size factors (summary):
    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
 0.00381 1.26103 1.66820 1.80626 2.11432 5.13726 
 DESeq2 complete.
-Writing expression matrix...
-Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD2_plots/expression_matrix_NOD2.csv 
-
-  -- UMAPs --
-  Highly variable genes selected: 2000 
-  Running UMAP (all cells)...
-    PCs selected: 39 (80.1% variance explained)
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD2_plots/umap_NOD2_all_by_population.pdf 
-  Running UMAP (CD45neg cells, n=62)...
-    PCs selected: 36 (80.5% variance explained)
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD2_plots/umap_NOD2_cd45neg_by_population.pdf 
-  Running Leiden clustering (resolution=0.5)...
-  Clusters found: 3 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD2_plots/umap_NOD2_cd45neg_by_cluster.pdf 
-
-  -- Per-strain UMAP --
-  Running UMAP (HVGs)...
-    PCs selected: 39 (80.1% variance explained)
-  Cells: 69 | Leiden resolution: 0.8 | n_neighbors: 11 
-  Running Leiden clustering on UMAP coordinates...
-  Clusters found: 4 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD2_plots/umap_NOD2_by_cluster.pdf 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD2_plots/umap_NOD2_by_population.pdf 
-
-  -- CD45+ MHCIIpos vs CD45- MHCIIhi --
-  Significant DEGs: 924 
-  Top 20 genes: Ext2, Bmpr2, Gm13597, Eif4e3, Cyb561, Oaz2-ps, Apbb2, Tspan12, Igfbp3, Phactr2, Col1a1, Usp1, Nbeal1, Tmem199, Clpb, Cnppd1, Map2k4, Sirt1, Ralgps2, Dbt 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD2_plots/volcano_NOD2_CD45pos_vs_MHCIIhi.pdf 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD2_plots/violins_NOD2_CD45pos_vs_MHCIIhi.pdf 
-
-  -- CD45+ MHCIIpos vs CD45- MHCIIlo --
-  Significant DEGs: 930 
-  Top 20 genes: Bmpr2, Apbb2, Eif4e3, Ext2, Tspan12, Gm13597, Cyb561, Igfbp3, Oaz2-ps, Thbs1, Dhx57, Pdgfrl, Col1a1, Pskh1, Umps, Snx18, Tmem198, Rpf2, Fam20a, Gypc 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD2_plots/volcano_NOD2_CD45pos_vs_MHCIIlo.pdf 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD2_plots/violins_NOD2_CD45pos_vs_MHCIIlo.pdf 
-
-  -- CD45- MHCIIhi vs CD45- MHCIIlo --
-  Significant DEGs: 145 
-  Top 20 genes: Mfap2, Tfdp2, Senp7, Car2, Erbb2, Cp, Zfp954, Dhx57, Ptges2, 5430405H02Rik, Nos3, Taf11, Fgf1, Slc52a2, Gle1, Rad9a, Gbp5, Apmap, Usp1, Ercc5 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD2_plots/volcano_NOD2_MHCIIhi_vs_MHCIIlo.pdf 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD2_plots/violins_NOD2_MHCIIhi_vs_MHCIIlo.pdf 
-
- NOD2 complete. 10 files written to: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD2_plots 
-
 ==============================================================
 Strain: NODCD31 
 ==============================================================
@@ -313,40 +141,8 @@ converting counts to integer mode
 Reference cells for size factor estimation: 14 
 Size factors (summary):
    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
-0.04192 1.29858 1.85977 1.90159 2.51124 4.05165 
+0.04192 1.29858 1.85978 1.90159 2.51124 4.05165 
 DESeq2 complete.
-Writing expression matrix...
-Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODCD31_plots/expression_matrix_NODCD31.csv 
-
-  -- UMAPs --
-  Highly variable genes selected: 2000 
-  Running UMAP (all cells)...
-    PCs selected: 47 (81.1% variance explained)
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODCD31_plots/umap_NODCD31_all_by_population.pdf 
-  Running UMAP (CD45neg cells, n=71)...
-    PCs selected: 47 (81.1% variance explained)
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODCD31_plots/umap_NODCD31_cd45neg_by_population.pdf 
-  Running Leiden clustering (resolution=0.5)...
-  Clusters found: 3 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODCD31_plots/umap_NODCD31_cd45neg_by_cluster.pdf 
-
-  -- Per-strain UMAP --
-  Running UMAP (HVGs)...
-    PCs selected: 47 (81.1% variance explained)
-  Cells: 71 | Leiden resolution: 0.8 | n_neighbors: 11 
-  Running Leiden clustering on UMAP coordinates...
-  Clusters found: 3 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODCD31_plots/umap_NODCD31_by_cluster.pdf 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODCD31_plots/umap_NODCD31_by_population.pdf 
-
-  -- CD45- MHCIIpos CD31- vs CD45- MHCIIpos CD31+ --
-  Significant DEGs: 409 
-  Top 20 genes: Phf14, Rassf9, Larp1, C130074G19Rik, Jag2, Pear1, Lrrcc1, Mdfic, Rbm18, Hapstr1, Cpa2, Lrrc70, Gc, 2810001G20Rik, Dnajc24, Fam20c, Gm16973, Tubd1, Tafa5, Nup133 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODCD31_plots/volcano_NODCD31_MHCIIpos_CD31neg_vs_MHCIIpos_CD31pos.pdf 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODCD31_plots/violins_NODCD31_MHCIIpos_CD31neg_vs_MHCIIpos_CD31pos.pdf 
-
- NODCD31 complete. 10 files written to: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODCD31_plots 
-
 ==============================================================
 Strain: NODPDL1 
 ==============================================================
@@ -366,39 +162,6 @@ Size factors (summary):
     Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
 0.008813 1.322329 2.507647 2.717814 3.736727 8.150015 
 DESeq2 complete.
-Writing expression matrix...
-Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODPDL1_plots/expression_matrix_NODPDL1.csv 
-
-  -- UMAPs --
-  Highly variable genes selected: 2000 
-  Running UMAP (all cells)...
-    PCs selected: 26 (80.3% variance explained)
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODPDL1_plots/umap_NODPDL1_all_by_population.pdf 
-  Running UMAP (CD45neg cells, n=37)...
-    PCs selected: 22 (81.6% variance explained)
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODPDL1_plots/umap_NODPDL1_cd45neg_by_population.pdf 
-  Running Leiden clustering (resolution=0.5)...
-  Clusters found: 2 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODPDL1_plots/umap_NODPDL1_cd45neg_by_cluster.pdf 
-
-  -- Per-strain UMAP --
-  Running UMAP (HVGs)...
-    PCs selected: 26 (80.3% variance explained)
-  Cells: 45 | Leiden resolution: 0.6 | n_neighbors: 7 
-  Running Leiden clustering on UMAP coordinates...
-  Clusters found: 3 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODPDL1_plots/umap_NODPDL1_by_cluster.pdf 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODPDL1_plots/umap_NODPDL1_by_population.pdf 
-
-  -- CD45+ MHCIIpos vs CD45- MHCIIpos --
-  Significant DEGs: 827 
-  Top 20 genes: Chic1, Zcchc18, Pcbd1, Fam20c, Slc7a14, Fkbp9, Inpp5f, Enho, Gprasp2, Slc38a10, Tifab, Niban1, Pilrb2, Renbp, Nqo2, Kctd10, Insl6, Bex6, Zfp276, Rps19-ps3 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODPDL1_plots/volcano_NODPDL1_CD45pos_vs_MHCIIpos.pdf 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODPDL1_plots/violins_NODPDL1_CD45pos_vs_MHCIIpos.pdf 
-
- NODPDL1 complete. 10 files written to: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODPDL1_plots 
-
-There were 50 or more warnings (use warnings() to see the first 50)
 ==============================================================
 Building combined UMAP (all strains)...
 ==============================================================
@@ -412,90 +175,23 @@ NA count: 0
 strain_condition sample:
 [1] "B6G7 CD45+ MHCIIpos" "B6G7 CD45+ MHCIIpos" "B6G7 CD45+ MHCIIpos"
 [4] "B6G7 CD45+ MHCIIpos" "B6G7 CD45+ MHCIIpos" "B6G7 CD45- MHCIIlo" 
-HVGs selected for combined UMAP: 2000 
-Running PCA + UMAP on HVG matrix (visualization)...
-    PCs selected: 158 (80.1% variance explained)
-Running PCA on all 8948 genes for clustering...
-PCs selected (all-gene): 187 (80.0% variance explained)
-Running Leiden clustering on all-gene PCs (resolution=0.5)...
-Clusters found: 3 
-Warning message:
-In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'All strains — 351 cells by Leiden cluster' in 'mbcsToSbcs': - substituted for — (U+2014)
-Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/combined_plots/umap_all351_by_cluster.pdf 
-Warning message:
-In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'All strains — 351 cells by strain & population' in 'mbcsToSbcs': - substituted for — (U+2014)
-Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/combined_plots/umap_all351_by_strain_population.pdf 
-Generating per-strain-group panels on comprehensive UMAP coordinates...
-Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/combined_plots/umap_per_strain_on_comprehensive.pdf 
-
-Combined UMAPs complete.
 
 Generating cluster composition bar charts...
 Warning messages:
-1: package ‘openxlsx’ was built under R version 4.4.3 
-2: package ‘RColorBrewer’ was built under R version 4.4.3 
-Warning messages:
-1: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Strain & population — counts' in 'mbcsToSbcs': - substituted for — (U+2014)
-2: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Strain & population — proportions' in 'mbcsToSbcs': - substituted for — (U+2014)
-3: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Strain — counts' in 'mbcsToSbcs': - substituted for — (U+2014)
-4: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Strain — proportions' in 'mbcsToSbcs': - substituted for — (U+2014)
-5: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Labels shown for segments ≥05% of bar' in 'mbcsToSbcs': >= substituted for ≥ (U+2265)
-6: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Cluster composition — 3 clusters | n=372 cells' in 'mbcsToSbcs': - substituted for — (U+2014)
-Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/combined_plots/barplots_cluster_composition.pdf 
-
-Running Wilcoxon rank-sum marker gene analysis...
-Clusters: 1, 2, 3 
-Genes: 8948 
-  Cluster 1 vs rest...
-    Candidates (log2FC >= 0.5 ): 1203 
-    Significant markers: 100 | Top gene: Ctss 
-  Cluster 2 vs rest...
-    Candidates (log2FC >= 0.5 ): 45 
-    Significant markers: 36 | Top gene: Ppy 
-  Cluster 3 vs rest...
-    Candidates (log2FC >= 0.5 ): 7608 
-    Significant markers: 100 | Top gene: Serping1 
-Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/combined_plots/cluster_marker_genes.xlsx 
-
-Generating cluster marker gene heatmap...
-Total unique genes in heatmap: 45 
-'magick' package is suggested to install to give better rasterization.
-
-Set `ht_opt$message = FALSE` to turn off this message.
-Warning message:
-In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Cluster marker genes — 45 genes x 351 cells' in 'mbcsToSbcs': - substituted for — (U+2014)
-null device 
-          1 
-Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/combined_plots/heatmap_cluster_markers.pdf 
+1: package ‘ComplexHeatmap’ was built under R version 4.5.2 
+2: package ‘circlize’ was built under R version 4.5.2 
+ComplexHeatmap raster device: agg_png  
 
 Running cell identity scoring against CellMarker 2.0...
   Downloading CellMarker 2.0 mouse table...
   Download failed: cannot open URL 'http://bio-bigdata.hrbmu.edu.cn/CellMarker/CellMarker_download_files/file/Cell_marker_Mouse.xlsx' 
-Warning message:
-cannot open URL 'https://bio-bigdata.hrbmu.edu.cn/CellMarker/CellMarker_download_files/file/Cell_marker_Mouse.xlsx': HTTP status was '403 Forbidden' 
+Warning messages:
+1: In download.file(cm_url, cm_cache, mode = "wb", quiet = TRUE) :
+  downloaded length 0 != reported length 153
+2: In download.file(cm_url, cm_cache, mode = "wb", quiet = TRUE) :
+  cannot open URL 'https://bio-bigdata.hrbmu.edu.cn/CellMarker/CellMarker_download_files/file/Cell_marker_Mouse.xlsx': HTTP status was '403 Forbidden'
   Using built-in curated marker set (CellMarker download unavailable)
   Built-in cell types: 20 
-  Scoring combined clusters...
-    Combined cluster 1 
-    Combined cluster 2 
-    Combined cluster 3 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/combined_plots/cell_identity_combined_clusters.xlsx 
-
-Running Mouse Cell Atlas expression profile correlation (combined)...
-  Trying: https://github.com/rnabioco/clustifyrdata/raw/main/data/ref_MCA.rda 
-  Download successful
-  ref_MCA loaded: 8601 genes x 713 cell types
-  Common genes for MCA correlation: 6410 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/combined_plots/MCA_celltype_correlation_combined_clusters.xlsx 
 
 Running VAF/VRC correlation analysis (Clarke et al. 2025)...
   Loading Clarke et al. mouse count matrix...
@@ -507,80 +203,6 @@ Running VAF/VRC correlation analysis (Clarke et al. 2025)...
   cluster1 (n=100): VAF panel 0.506 | VRC panel 0.178 | diff +0.328  <- VAF
   cluster2 (n=64): VAF panel 1.169 | VRC panel 4.976 | diff -3.807  <- VRC
   sanity: collagen VAF 0.739 vs VRC 0.523 | endothelial VAF 0.149 vs VRC 6.178
-  Computing correlations against combined Leiden clusters...
-  Common genes for correlation: 7918 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/combined_plots/VAF_VRC_correlation_combined_clusters.xlsx 
-  Scoring per-strain clusters...
-    Cluster 4 - insufficient Wilcoxon markers ( 0 ), using top expressed genes
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/cell_identity_B6G7_clusters.xlsx 
-  Running MCA correlation for B6G7 ...
-  ref_MCA loaded: 8601 genes x 713 cell types
-  Common genes for MCA correlation: 7767 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6G7_plots/MCA_celltype_correlation_B6G7_clusters.xlsx 
-    Cluster 1 - insufficient Wilcoxon markers ( 0 ), using top expressed genes
-    Cluster 2 - insufficient Wilcoxon markers ( 0 ), using top expressed genes
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/cell_identity_B6MHCIIGFP_clusters.xlsx 
-  Running MCA correlation for B6MHCIIGFP ...
-  ref_MCA loaded: 8601 genes x 713 cell types
-  Common genes for MCA correlation: 6837 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/B6MHCIIGFP_plots/MCA_celltype_correlation_B6MHCIIGFP_clusters.xlsx 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/cell_identity_NOD_clusters.xlsx 
-  Running MCA correlation for NOD ...
-  ref_MCA loaded: 8601 genes x 713 cell types
-  Common genes for MCA correlation: 8086 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_plots/MCA_celltype_correlation_NOD_clusters.xlsx 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD2_plots/cell_identity_NOD2_clusters.xlsx 
-  Running MCA correlation for NOD2 ...
-  ref_MCA loaded: 8601 genes x 713 cell types
-  Common genes for MCA correlation: 7987 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD2_plots/MCA_celltype_correlation_NOD2_clusters.xlsx 
-    Cluster 2 - insufficient Wilcoxon markers ( 0 ), using top expressed genes
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODCD31_plots/cell_identity_NODCD31_clusters.xlsx 
-  Running MCA correlation for NODCD31 ...
-  ref_MCA loaded: 8601 genes x 713 cell types
-  Common genes for MCA correlation: 7825 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODCD31_plots/MCA_celltype_correlation_NODCD31_clusters.xlsx 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODPDL1_plots/cell_identity_NODPDL1_clusters.xlsx 
-  Running MCA correlation for NODPDL1 ...
-  ref_MCA loaded: 8601 genes x 713 cell types
-  Common genes for MCA correlation: 7937 
-  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NODPDL1_plots/MCA_celltype_correlation_NODPDL1_clusters.xlsx 
-
-Generating combined cluster violin plots...
-  Ptprc: present in 6/6 plates
-  Col1a1: present in 6/6 plates
-  Col1a2: present in 6/6 plates
-  Timp3: present in 6/6 plates
-  Spp1: present in 6/6 plates
-  Thy1: present in 6/6 plates
-  Pdpn: present in 6/6 plates
-  S100a4: present in 6/6 plates
-  Fn1: present in 6/6 plates
-  Pecam1: present in 6/6 plates
-  Eng: present in 6/6 plates
-  Cdh5: present in 6/6 plates
-  Kdr: present in 6/6 plates
-  Tie1: present in 6/6 plates
-  Vwf: present in 6/6 plates
-  Esam: present in 6/6 plates
-  Nod2: present in 6/6 plates
-  Ciita: present in 6/6 plates
-Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/combined_plots/violin_plots_by_cluster.pdf 
-
-==============================================================
-All outputs complete. Output structure:
- results/05_dge/B6G7_plots/  (file count varies with # of contrasts)
- results/05_dge/B6MHCIIGFP_plots/  (file count varies with # of contrasts)
- results/05_dge/NOD_plots/  (file count varies with # of contrasts)
- results/05_dge/NOD2_plots/  (file count varies with # of contrasts)
- results/05_dge/NODCD31_plots/  (file count varies with # of contrasts)
- results/05_dge/NODPDL1_plots/  (file count varies with # of contrasts)
- results/05_dge/combined_plots/
-   - umap_all351_by_cluster.pdf
-   - umap_all351_by_strain_population.pdf
-   - barplots_cluster_composition.pdf  (all 4 charts, 2x2)
-   - cluster_marker_genes.xlsx
-   - heatmap_cluster_markers.pdf
 ==============================================================
 
 ==============================================================
@@ -663,35 +285,176 @@ Files written:
  - VAF_VRC_correlation_merged_clusters.xlsx 
  - violin_plots_by_cluster.pdf 
 Warning messages:
-1: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Your cells + Clarke 2025 — 469 cells by Leiden cluster' in 'mbcsToSbcs': - substituted for — (U+2014)
-2: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Your cells + Clarke 2025 — 469 cells by strain & population' in 'mbcsToSbcs': - substituted for — (U+2014)
+1: package ‘limma’ was built under R version 4.5.2 
+2: The `resolution_parameter` argument of `cluster_leiden()` is deprecated as of
+igraph 2.1.0.
+ℹ Please use the `resolution` argument instead. 
 3: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Strain & population — counts' in 'mbcsToSbcs': - substituted for — (U+2014)
+  for 'Your cells + Clarke 2025 — 469 cells by Leiden cluster' in 'mbcsToSbcs': - substituted for — (U+2014)
 4: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Strain & population — proportions' in 'mbcsToSbcs': - substituted for — (U+2014)
+  for 'Your cells + Clarke 2025 — 469 cells by strain & population' in 'mbcsToSbcs': - substituted for — (U+2014)
 5: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Strain — counts' in 'mbcsToSbcs': - substituted for — (U+2014)
+  for 'Strain & population — counts' in 'mbcsToSbcs': - substituted for — (U+2014)
 6: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Strain — proportions' in 'mbcsToSbcs': - substituted for — (U+2014)
+  for 'Strain & population — proportions' in 'mbcsToSbcs': - substituted for — (U+2014)
 7: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Merged cluster composition — 4 clusters | n=469 cells' in 'mbcsToSbcs': - substituted for — (U+2014)
+  for 'Strain — counts' in 'mbcsToSbcs': - substituted for — (U+2014)
 8: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  for 'Strain — proportions' in 'mbcsToSbcs': - substituted for — (U+2014)
+9: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
+  for 'Merged cluster composition — 4 clusters | n=469 cells' in 'mbcsToSbcs': - substituted for — (U+2014)
+10: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
   for 'Merged cluster marker genes — 60 genes x 469 cells' in 'mbcsToSbcs': - substituted for — (U+2014)
 
 ==============================================================
+Building NoMHCIIFilter UMAP (all sorted cells, MHCII-agnostic)...
+==============================================================
+Cells sorted: 564 | after the MHCII filter: 351 
+Library size   - min: 101 median: 864374.5 max: 5422473 
+Genes detected - min: 51 median: 3365.5 max: 8108 
+Depth floor: >= 500 genes detected -> keeping 454 of 564 cells ( 110 removed )
+  Removed per plate:
+
+      B6G7 B6MHCIIGFP        NOD       NOD2    NODCD31    NODPDL1 
+        15         20         23         30         15          7 
+  Removed per plate x condition:
+            
+             CD45neg_MHCIIhi CD45neg_MHCIIlo CD45neg_MHCIIpos
+  B6G7                     9               6                0
+  B6MHCIIGFP               6              11                0
+  NOD                      9               8                0
+  NOD2                    14              10                0
+  NODCD31                  0               0                0
+  NODPDL1                  0               0                5
+            
+             CD45neg_MHCIIpos_CD31neg CD45neg_MHCIIpos_CD31pos CD45pos_MHCIIpos
+  B6G7                              0                        0                0
+  B6MHCIIGFP                        0                        0                3
+  NOD                               0                        0                6
+  NOD2                              0                        0                6
+  NODCD31                           3                       12                0
+  NODPDL1                           0                        0                2
+Plates retained: 6 
+
+-- NoMHCIIFilter | B6G7 --
+  Cells: 81 | reference condition: CD45pos_MHCIIpos 
+  Genes passing filter: 17308 
+converting counts to integer mode
+  Reference cells: 12 | genes nonzero in all of them: 251 
+  VST complete: 17308 genes x 81 cells
+
+-- NoMHCIIFilter | B6MHCIIGFP --
+  Cells: 64 | reference condition: CD45pos_MHCIIpos 
+  Genes passing filter: 16622 
+converting counts to integer mode
+  Reference cells: 9 | genes nonzero in all of them: 122 
+  *** WARNING: only 122 genes underpin this plate's size factors --
+       normalization is unstable. Usually one near-empty reference
+       well; check the depth diagnostic above. ***
+  VST complete: 16622 genes x 64 cells
+
+-- NoMHCIIFilter | NOD --
+  Cells: 73 | reference condition: CD45pos_MHCIIpos 
+  Genes passing filter: 17390 
+converting counts to integer mode
+  Reference cells: 6 | genes nonzero in all of them: 107 
+  *** WARNING: only 107 genes underpin this plate's size factors --
+       normalization is unstable. Usually one near-empty reference
+       well; check the depth diagnostic above. ***
+  VST complete: 17390 genes x 73 cells
+
+-- NoMHCIIFilter | NOD2 --
+  Cells: 66 | reference condition: CD45pos_MHCIIpos 
+  Genes passing filter: 16129 
+converting counts to integer mode
+  Reference cells: 6 | genes nonzero in all of them: 349 
+  VST complete: 16129 genes x 66 cells
+
+-- NoMHCIIFilter | NODCD31 --
+  Cells: 81 | reference condition: CD45neg_MHCIIpos_CD31neg 
+  Genes passing filter: 15252 
+converting counts to integer mode
+  Reference cells: 15 | genes nonzero in all of them: 57 
+  *** WARNING: only 57 genes underpin this plate's size factors --
+       normalization is unstable. Usually one near-empty reference
+       well; check the depth diagnostic above. ***
+  VST complete: 15252 genes x 81 cells
+
+-- NoMHCIIFilter | NODPDL1 --
+  Cells: 89 | reference condition: CD45pos_MHCIIpos 
+  Genes passing filter: 18591 
+converting counts to integer mode
+  Reference cells: 16 | genes nonzero in all of them: 260 
+  VST complete: 18591 genes x 89 cells
+
+Genes common across all plates (no MHCII filter): 12049 
+Total cells in NoMHCIIFilter matrix: 454 
+HVGs selected: 2000 
+Running PCA + UMAP on HVG matrix (visualization)...
+    PCs selected: 214 (80.1% variance explained)
+
+Typing each cell against curated lineage panels...
+  Typing matrix: 27642 genes x 454 cells (raw-count log-CPM, not the cross-plate intersection)
+  Hematopoietic    10/10 panel genes found
+  Endothelial      10/10 panel genes found
+  Fibroblast       11/11 panel genes found
+  Pericyte_SMC     7/7 panel genes found
+  Endocrine_islet  12/12 panel genes found
+  Acinar_ductal    8/9 panel genes found
+
+  Cells per type (argmax of panel scores):
+nf_type
+  Acinar_ductal Endocrine_islet     Endothelial      Fibroblast   Hematopoietic 
+             22             156             136              25             105 
+   Pericyte_SMC 
+             10 
+  Ambiguous (margin < 0.25 ): 19 of 454 
+Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NoMHCIIFilter/umap_all454_by_cell_type.pdf 
+
+Generating violin plots for Nod2, Ciita in Endothelial / Fibroblast ...
+Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NoMHCIIFilter/violin_GOI_by_cell_type.pdf 
+
+Writing per-cell expression workbook...
+
+  Genes of interest by cell type:
+ gene_symbol       cell_type n_cells n_detected pct_detected mean_VST
+       Ciita   Hematopoietic     105         60         57.1   2.5310
+       Ciita   Acinar_ductal      22         12         54.5   0.7492
+       Ciita    Pericyte_SMC      10          3         30.0  -1.1957
+       Ciita     Endothelial     136         34         25.0  -1.6201
+       Ciita      Fibroblast      25          3         12.0  -2.0041
+       Ciita Endocrine_islet     156         14          9.0  -2.5926
+        Nod2     Endothelial     136          7          5.1  -3.5756
+        Nod2   Acinar_ductal      22          1          4.5  -3.0974
+        Nod2   Hematopoietic     105          4          3.8  -3.2048
+        Nod2 Endocrine_islet     156          1          0.6  -3.1007
+        Nod2      Fibroblast      25          0          0.0  -3.1082
+        Nod2    Pericyte_SMC      10          0          0.0  -3.3509
+ median_VST mean_CPM median_CPM_detected
+     4.5478   404.23              436.68
+     1.0701    64.24              104.78
+    -2.8481    60.48              293.13
+    -4.1932    71.71              201.70
+    -2.8481    35.92              245.07
+    -2.2288     7.94               11.75
+    -4.1932     7.13              111.14
+    -2.8481     0.38                8.41
+    -3.9693     9.96              242.76
+    -3.4020     2.56              400.00
+    -2.8481     0.00                  NA
+    -2.8481     0.00                  NA
+  Saved: GOI_expression_by_cell.xlsx
+  Saved: expression_all_genes_by_cell_VST.csv ( 12049 genes x 454 cells )
+  Saved: expression_all_genes_by_cell_counts.csv ( 56941 genes x 454 cells )
+
+==============================================================
 All outputs complete. Output structure:
- results/05_dge/B6G7_plots/  (file count varies with # of contrasts)
- results/05_dge/B6MHCIIGFP_plots/  (file count varies with # of contrasts)
- results/05_dge/NOD_plots/  (file count varies with # of contrasts)
- results/05_dge/NOD2_plots/  (file count varies with # of contrasts)
- results/05_dge/NODCD31_plots/  (file count varies with # of contrasts)
- results/05_dge/NODPDL1_plots/  (file count varies with # of contrasts)
- results/05_dge/combined_plots/
-   - umap_all351_by_cluster.pdf
-   - umap_all351_by_strain_population.pdf
-   - barplots_cluster_composition.pdf  (all 4 charts, 2x2)
-   - cluster_marker_genes.xlsx
-   - heatmap_cluster_markers.pdf
+ (per-plate <STRAIN>_plots/ skipped - RUN_PER_STRAIN_PLOTS is FALSE)
+ (combined_plots/ skipped - RUN_COMBINED_PLOTS is FALSE)
+ results/05_dge/NoMHCIIFilter/
+   - umap_all*_by_cell_type.pdf
+   - violin_GOI_by_cell_type.pdf  (Nod2, Ciita in Endothelial / Fibroblast)
+   - GOI_expression_by_cell.xlsx
+   - expression_all_genes_by_cell_VST.csv
+   - expression_all_genes_by_cell_counts.csv
 ==============================================================

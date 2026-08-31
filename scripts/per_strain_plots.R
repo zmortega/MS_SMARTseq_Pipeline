@@ -111,6 +111,95 @@ VIOLIN_GENES <- c(
 MHCII_VST_MIN    <- 1.0    # minimum VST for both H2-Aa and H2-Ab
 MHCII_GENES      <- c("H2-Aa", "H2-Ab1")  # gene symbols to filter on
 
+# -- Depth floor for the NoMHCIIFilter analysis --------------------------------
+# Applies ONLY to the NoMHCIIFilter section at the end of this script. Every
+# other analysis is gated on MHCII expression instead and is unaffected by this
+# constant.
+#
+# Mirrors MIN_GENES_DETECTED in config.yaml, which is the pipeline's own
+# definition of a usable cell. It is repeated here rather than read from the
+# YAML because this script does not parse config.yaml at all; keep the two in
+# sync by hand if you change either.
+#
+# WHY IT IS NEEDED HERE SPECIFICALLY: dropping the MHCII filter also drops the
+# incidental depth screen it was performing. Shallow cells cluster by library
+# size rather than by biology, and a near-empty reference well collapses the
+# per-plate size-factor gene set (the estimator uses genes nonzero in EVERY
+# reference well, so one bad well is enough). Set to 0 to disable.
+NOFILT_MIN_GENES <- 500    # minimum genes detected (>=1 read) per cell
+
+# Genes given their own per-cluster violin panel in the NoMHCIIFilter folder.
+# Independent of VIOLIN_GENES above (which drives the combined/merged panels and
+# the per-plate count-filter exemption). Anything listed here must also appear in
+# VIOLIN_GENES, otherwise a plate with zero counts for it drops it from the
+# cross-plate intersection and it cannot be plotted.
+NF_VIOLIN_GENES  <- c("Ciita", "Nod2")   # legacy cluster-violin path only
+
+# -- NoMHCIIFilter: per-cell typing and the genes/cell types under study -------
+# Genes to quantify per cell and plot as violins.
+NF_GENES_OF_INTEREST <- c("Nod2", "Ciita")
+
+# Cell types the violins focus on. Must match names(NF_LINEAGE_PANELS).
+NF_FOCUS_TYPES       <- c("Endothelial", "Fibroblast")
+
+# A cell whose top panel score beats its runner-up by less than this is flagged
+# `ambiguous`. It is still counted in its top type -- the flag exists so a
+# borderline cell can be excluded when it matters, not silently trusted.
+NF_AMBIGUOUS_MARGIN  <- 0.25
+
+# Curated, deliberately broad and non-overlapping lineage panels. A marker
+# shared by two panels would make the argmax label meaningless.
+NF_LINEAGE_PANELS <- list(
+  Hematopoietic    = c("Ptprc","Coro1a","Laptm5","Lcp1","Fcer1g","Ctss","Cd52",
+                       "Cd74","Arhgdib","Cd48"),
+  Endothelial      = c("Pecam1","Cdh5","Kdr","Tie1","Vwf","Eng","Esam","Plvap",
+                       "Cldn5","Egfl7"),
+  # Col6a1 added after testing: 78% detected in fibroblasts vs 4% elsewhere,
+  # z=3.07 (above the panel mean, so it sharpens rather than dilutes -- the
+  # score is a mean, so a marker below the panel average actively hurts).
+  # Effect measured: 2 cells move Pericyte_SMC -> Fibroblast (23 -> 25, both
+  # still flagged ambiguous), and the median margin of the already-called
+  # fibroblasts rises 0.973 -> 1.238. Nod2 detection in fibroblasts stays 0.
+  Fibroblast       = c("Col1a1","Col1a2","Col3a1","Col6a1","Dcn","Lum",
+                       "Pdgfra","Postn","Fbln1","Mgp","Serpinf1"),
+  Pericyte_SMC     = c("Acta2","Pdgfrb","Rgs5","Myh11","Des","Notch3","Cspg4"),
+  Endocrine_islet  = c("Chga","Chgb","Scg2","Scg5","Ins1","Ins2","Gcg","Sst",
+                       "Ppy","Pcsk1n","Resp18","Pcsk2"),
+  Acinar_ductal    = c("Cela1","Ctrb1","Prss2","Cpa1","Amy2a5","Krt19","Krt18",
+                       "Sox9","Spp1")
+)
+
+# Leiden clustering + cluster marker heatmap + cluster identity workbooks.
+# Superseded by the per-cell typing; off by default because the Wilcoxon loops
+# and MCA download dominate this section's runtime.
+NF_RUN_CLUSTER_OUTPUTS <- FALSE
+
+# -- Which analyses to run -----------------------------------------------------
+# The per-plate folders and combined_plots are TURNED OFF, not deleted: flip a
+# flag back to TRUE to restore that output exactly as before. Turning them off
+# takes a full run from ~15 min to a fraction of that, which matters when
+# iterating on the sections that are still on.
+#
+# WHAT STILL RUNS REGARDLESS, because later sections depend on it:
+#   - the per-strain DESeq2/VST loop, which builds all_expr_list/all_meta_list
+#     -> combined_expr + combined_meta, which CombinedwithVAFPaperPlots consumes.
+#     Only that loop's PLOTS and spreadsheets are skipped, not its arithmetic.
+#   - combined_expr / combined_meta / strain_condition (merged needs all three)
+#   - the CellMarker database + score_cluster (merged and NoMHCIIFilter both
+#     score against it)
+#   - the openxlsx/ComplexHeatmap/circlize package block and HT_RASTER_DEVICE
+#
+# So RUN_COMBINED_PLOTS=FALSE skips the combined_plots FOLDER, not the combined
+# matrix it is named after.
+# MIN_LABEL_PROP is defined here as well as in the (gateable) bar-chart section,
+# because the merged bar charts use it and must not depend on that gate.
+MIN_LABEL_PROP <- 0.05          # only label bar segments >= 5%
+
+RUN_PER_STRAIN_PLOTS <- FALSE   # results/05_dge/<STRAIN>_plots/
+RUN_COMBINED_PLOTS   <- FALSE   # results/05_dge/combined_plots/
+RUN_VAF_MERGED       <- TRUE    # results/05_dge/CombinedwithVAFPaperPlots/
+RUN_NOMHCIIFILTER    <- TRUE    # results/05_dge/NoMHCIIFilter/
+
 # -- Self-copy into scripts/ for version control -------------------------------
 # (skipped when already running from scripts/per_strain_plots.R, since
 # file.copy() errors if source and destination are the same file)
@@ -216,6 +305,7 @@ cat("Applying MHCII expression filter (both", paste(MHCII_GENES, collapse=" & ")
 
 # Look up Ensembl IDs for H2-Aa and H2-Ab1
 sym_to_ens_map  <- setNames(names(sym_map), sym_map)
+sym_to_ens      <- sym_to_ens_map   # alias; also re-set inside the gated combined block
 
 # Ensembl IDs for the violin genes, resolved once. These are exempted from every
 # plate's low-count filter so that zero-expression cells still produce plottable
@@ -269,6 +359,15 @@ if (nrow(removed_df) > 0) {
   cat("
 ")
 }
+
+# -- Preserve the PRE-filter matrices for the NoMHCIIFilter analysis -----------
+# The filter below overwrites `counts` and `meta` in place, so the unfiltered
+# cell set is unrecoverable after this point. The NoMHCIIFilter section at the
+# very end of this script is the only consumer. Nothing between here and there
+# reads these, so the existing analyses are untouched.
+counts_all <- counts
+meta_all   <- meta
+stopifnot(identical(rownames(meta_all), colnames(counts_all)))
 
 # Apply filter globally — all downstream code uses these filtered objects.
 # Subset BOTH by cell_id (not by the logical mask) so they cannot desynchronize.
@@ -558,7 +657,9 @@ for (strain in strains) {
   cat("==============================================================\n")
 
   out_dir <- file.path(dge_dir, paste0(strain, "_plots"))
-  dir.create(out_dir, recursive=TRUE)
+  # Only create the per-plate folder when its outputs are actually written,
+  # otherwise a gated-off run litters 05_dge/ with empty <STRAIN>_plots/ dirs.
+  if (RUN_PER_STRAIN_PLOTS) dir.create(out_dir, recursive=TRUE)
 
   # -- Subset to this strain ---------------------------------------------------
   strain_cells <- meta$cell_id[meta$strain == strain]
@@ -641,6 +742,7 @@ for (strain in strains) {
   s_meta_store$strain    <- as.character(s_meta_store$strain)
   all_meta_list[[strain]] <- s_meta_store
 
+  if (RUN_PER_STRAIN_PLOTS) {
   # -- Expression matrix -------------------------------------------------------
   cat("Writing expression matrix...\n")
   cond_levels <- c(s_ref,
@@ -1080,6 +1182,7 @@ for (strain in strains) {
   }
 
   cat("\n", strain, "complete. 10 files written to:", out_dir, "\n\n")
+  } # end RUN_PER_STRAIN_PLOTS
 }
 
 # ==============================================================================
@@ -1116,6 +1219,7 @@ cat("NA count:", sum(is.na(combined_meta$strain_condition)), "\n")
 cat("strain_condition sample:\n")
 print(head(combined_meta$strain_condition))
 
+if (RUN_COMBINED_PLOTS) {
 # HVG selection on combined matrix
 gene_vars_comb <- apply(combined_expr, 1, var)
 hvg_comb       <- names(sort(gene_vars_comb, decreasing=TRUE))[
@@ -1193,6 +1297,7 @@ comb1_path <- file.path(combined_out,
 ggsave(comb1_path, p_comb_clust, width=7, height=6)
 cat("Saved:", comb1_path, "\n")
 
+} # end RUN_COMBINED_PLOTS
 # -- Combined UMAP 2: colored by strain_group x condition -----------------------
 # Build a dynamic palette sized to however many strain groups / conditions are
 # actually present (instead of a fixed dictionary). NOD-family plates share one
@@ -1235,6 +1340,7 @@ for (st in strain_groups) {
   }
 }
 
+if (RUN_COMBINED_PLOTS) {
 p_comb_strain <- ggplot(umap_comb_df,
                          aes(x=UMAP1, y=UMAP2, color=strain_condition)) +
   geom_point(size=1.0, alpha=1.0, stroke=0.2, shape=21,
@@ -1317,6 +1423,7 @@ ggsave(strain_panels_path, strain_panels_combined,
 cat("Saved:", strain_panels_path, "\n")
 
 cat("\nCombined UMAPs complete.\n")
+} # end RUN_COMBINED_PLOTS
 
 # ==============================================================================
 # Bar charts: cluster composition (all 4 in one PDF, 2x2 layout)
@@ -1344,6 +1451,23 @@ suppressPackageStartupMessages({
   library(circlize)
   library(RColorBrewer)
 })
+
+# -- Raster device for ComplexHeatmap ------------------------------------------
+# The heatmaps below use use_raster=TRUE, which needs a working bitmap device to
+# write a temp PNG. ComplexHeatmap defaults to grDevices::png(), which on macOS
+# routes through cairo/X11 -- and on a machine without XQuartz that fails at
+# draw() time with an opaque "unable to open .heatmap_body_*.png", killing the
+# run after most outputs have already been written.
+#
+# ragg::agg_png is self-contained (no cairo, no X11), so prefer it when
+# available. Falls back to the stock device otherwise, which still works on any
+# machine that does have XQuartz.
+HT_RASTER_DEVICE <- if (requireNamespace("ragg", quietly=TRUE)) "agg_png" else "png"
+cat("ComplexHeatmap raster device:", HT_RASTER_DEVICE,
+    if (HT_RASTER_DEVICE == "png") "(install 'ragg' if heatmaps fail to render)" else "",
+    "\n")
+if (RUN_COMBINED_PLOTS) {
+# (moved into the RUN_COMBINED_PLOTS gate above)
 
 # Attach clean labels to plotting df
 umap_comb_df$condition_clean  <- clean_label(umap_comb_df$condition)
@@ -1458,11 +1582,13 @@ cat("Saved:", bars_path, "\n")
 # ==============================================================================
 cat("\nRunning Wilcoxon rank-sum marker gene analysis...\n")
 
+} # end RUN_COMBINED_PLOTS
 # Parameters
 MIN_LOG2FC  <- 0.5   # minimum log2FC (VST difference) to consider
 MAX_PADJ    <- 0.05  # BH-adjusted p-value threshold
 TOP_EXCEL   <- 100   # genes per cluster in Excel
 TOP_HEATMAP <- 15    # genes per cluster for heatmap
+if (RUN_COMBINED_PLOTS) {
 
 cluster_vec    <- setNames(as.character(umap_comb_df$cluster), umap_comb_df$cell_id)
 cluster_levels <- sort(unique(as.integer(cluster_vec)))
@@ -1625,7 +1751,8 @@ ht <- Heatmap(
     legend_height  = unit(3, "cm")
   ),
   use_raster            = TRUE,
-  raster_quality        = 5
+  raster_quality        = 5,
+  raster_device         = HT_RASTER_DEVICE
 )
 
 heatmap_path <- file.path(combined_out, "heatmap_cluster_markers.pdf")
@@ -1634,6 +1761,7 @@ draw(ht, heatmap_legend_side="right", annotation_legend_side="bottom")
 dev.off()
 cat("Saved:", heatmap_path, "\n")
 
+} # end RUN_COMBINED_PLOTS
 # ==============================================================================
 # Cell identity scoring: CellMarker 2.0 gene set overlap per cluster
 # ==============================================================================
@@ -1747,6 +1875,7 @@ score_cluster <- function(cluster_markers, cell_db, universe_size) {
 universe_genes <- to_sym(rownames(combined_expr))
 universe_size  <- length(unique(universe_genes))
 
+if (RUN_COMBINED_PLOTS) {
 # -- Score combined clusters ---------------------------------------------------
 cat("  Scoring combined clusters...\n")
 wb_cellid_comb <- createWorkbook()
@@ -1804,6 +1933,7 @@ run_mca_correlation(
   label            = "combined"
 )
 
+} # end RUN_COMBINED_PLOTS
 # ==============================================================================
 # VAF / VRC correlation: compare clusters to Clarke et al. 2025 (GSE292898)
 # ==============================================================================
@@ -1946,6 +2076,7 @@ if (!file.exists(vaf_counts_f)) {
     CD45pos = mean_cd45pos_ref
   )
 
+if (RUN_COMBINED_PLOTS) {
   # -- Compute correlations for each of your Leiden clusters ------------------
   # Use combined_expr (VST) mean profiles per cluster
   cat("  Computing correlations against combined Leiden clusters...\n")
@@ -2047,7 +2178,9 @@ if (!file.exists(vaf_counts_f)) {
   saveWorkbook(wb_vaf, vaf_corr_path, overwrite=TRUE)
   cat("  Saved:", vaf_corr_path, "\n")
 }
+} # end RUN_COMBINED_PLOTS
 
+if (RUN_PER_STRAIN_PLOTS) {
 # -- Score per-strain clusters ------------------------------------------------
 cat("  Scoring per-strain clusters...\n")
 
@@ -2168,7 +2301,9 @@ for (strain in strains) {
     label             = strain
   )
 }
+} # end RUN_PER_STRAIN_PLOTS
 
+if (RUN_COMBINED_PLOTS) {
 # ==============================================================================
 # Combined cluster violin plots
 # ==============================================================================
@@ -2296,7 +2431,9 @@ if (nrow(vln_comb_df) == 0) {
          height = n_rows_vln * 5)
   cat("Saved:", vln_path, "\n")
 }
+} # end RUN_COMBINED_PLOTS
 
+if (RUN_COMBINED_PLOTS) {
 cat("\n==============================================================\n")
 cat("All outputs complete. Output structure:\n")
 for (st in strains) {
@@ -2308,6 +2445,7 @@ cat("   - umap_all", n_comb_cells, "_by_strain_population.pdf\n", sep="")
 cat("   - barplots_cluster_composition.pdf  (all 4 charts, 2x2)\n")
 cat("   - cluster_marker_genes.xlsx\n")
 cat("   - heatmap_cluster_markers.pdf\n")
+} # end RUN_COMBINED_PLOTS
 cat("==============================================================\n")
 
 # ==============================================================================
@@ -2320,7 +2458,9 @@ cat("==============================================================\n")
 vaf_counts_f2 <- file.path(base_dir,
   "reference/GSE292898_teyton_don_2025_processed_mouse_raw_counts_matrix.csv.gz")
 
-if (!file.exists(vaf_counts_f2)) {
+if (!RUN_VAF_MERGED) {
+  cat("Skipping CombinedwithVAFPaperPlots - RUN_VAF_MERGED is FALSE\n")
+} else if (!file.exists(vaf_counts_f2)) {
   cat("WARNING: Clarke et al. count matrix not found. Skipping merged analysis.\n")
   cat("Place file at:", vaf_counts_f2, "\n")
 } else {
@@ -2972,7 +3112,7 @@ if (!file.exists(vaf_counts_f2)) {
     column_title=paste0("Merged cluster marker genes — ",
                          length(hm_genes_m), " genes x ", ncol(expr_z_m), " cells"),
     column_title_gp=gpar(fontsize=12, fontface="bold"),
-    use_raster=TRUE, raster_quality=5
+    use_raster=TRUE, raster_quality=5, raster_device=HT_RASTER_DEVICE
   )
   hm_path_m <- file.path(vaf_out_dir, "heatmap_cluster_markers.pdf")
   pdf(hm_path_m, width=18,
@@ -3321,18 +3461,961 @@ if (!file.exists(vaf_counts_f2)) {
 } # end if vaf_counts_f2 exists
 
 # ==============================================================================
-# Cluster marker genes: hybrid expression score per cluster
+# NoMHCIIFilter: unsupervised clustering of every sorted cell, MHCII-agnostic
+# ==============================================================================
+# "No MHCII filter" is literal: MHCII expression is not used to include or
+# exclude anything here. The one gate that IS applied is a sequencing-depth
+# floor (NOFILT_MIN_GENES), which is a data-quality criterion, not a biological
+# one -- see that constant at the top of the script.
+# Purely additive. Runs last, reads only counts_all/meta_all (saved before the
+# MHCII filter overwrote counts/meta), writes only to results/05_dge/
+# NoMHCIIFilter/, and assigns nothing that any earlier section reads. Every
+# other output folder is identical with or without this block.
+#
+# Method is deliberately identical to the combined_plots UMAP so the two are
+# comparable: per-plate low-count filter -> per-plate DESeq2 with size factors
+# from that plate's own reference wells -> VST -> intersect genes across plates
+# -> top N_HVG by variance -> PCA -> UMAP for layout, plus a separate all-gene
+# PCA -> kNN -> Leiden for the cluster assignment. Same tuning constants, same
+# seed. The ONLY difference is which cells go in.
+if (!RUN_NOMHCIIFILTER) {
+  cat("\nSkipping NoMHCIIFilter - RUN_NOMHCIIFILTER is FALSE\n")
+} else {
 
+cat("\n==============================================================\n")
+cat("Building NoMHCIIFilter UMAP (all sorted cells, MHCII-agnostic)...\n")
+cat("==============================================================\n")
+
+nf_out_dir <- file.path(dge_dir, "NoMHCIIFilter")
+dir.create(nf_out_dir, recursive=TRUE, showWarnings=FALSE)
+
+cat("Cells sorted:", ncol(counts_all), "| after the MHCII filter:", ncol(counts),
+    "\n")
+
+# -- Depth floor ---------------------------------------------------------------
+# The MHCII filter was incidentally screening out shallow cells; without it they
+# have to be excluded explicitly. See NOFILT_MIN_GENES at the top of the script
+# for why. Every cell that clears the floor is kept regardless of MHCII.
+nf_lib   <- colSums(counts_all)
+nf_ngene <- colSums(counts_all > 0)
+cat("Library size   - min:", min(nf_lib), "median:", median(nf_lib),
+    "max:", max(nf_lib), "\n")
+cat("Genes detected - min:", min(nf_ngene), "median:", median(nf_ngene),
+    "max:", max(nf_ngene), "\n")
+
+nf_pass  <- names(nf_ngene)[nf_ngene >= NOFILT_MIN_GENES]
+nf_drop  <- setdiff(colnames(counts_all), nf_pass)
+cat("Depth floor: >=", NOFILT_MIN_GENES, "genes detected -> keeping",
+    length(nf_pass), "of", ncol(counts_all), "cells (",
+    length(nf_drop), "removed )\n")
+
+if (length(nf_drop) > 0) {
+  cat("  Removed per plate:\n")
+  print(table(meta_all[nf_drop, "strain"]))
+  cat("  Removed per plate x condition:\n")
+  print(table(meta_all[nf_drop, "strain"], meta_all[nf_drop, "condition"]))
+}
+
+# Subset by cell_id, never by a logical mask, so counts and metadata cannot
+# desynchronize (same discipline as the MHCII filter above).
+nf_counts_all <- counts_all[, nf_pass, drop=FALSE]
+nf_meta_all   <- meta_all[nf_pass, , drop=FALSE]
+stopifnot(identical(rownames(nf_meta_all), colnames(nf_counts_all)))
+
+if (ncol(nf_counts_all) < 10)
+  stop("Depth floor left ", ncol(nf_counts_all),
+       " cells - NOFILT_MIN_GENES is almost certainly too high.")
+
+# Strains are re-derived from the depth-filtered metadata: a plate that lost
+# every cell would otherwise still be attempted.
+nf_strains <- sort(unique(nf_meta_all$strain))
+cat("Plates retained:", length(nf_strains), "\n")
+
+nf_expr_list <- list()
+nf_meta_list <- list()
+
+for (nf_strain in nf_strains) {
+  cat("\n-- NoMHCIIFilter |", nf_strain, "--\n")
+
+  nf_cells  <- nf_meta_all$cell_id[nf_meta_all$strain == nf_strain]
+  nf_shared <- intersect(colnames(nf_counts_all), nf_cells)
+  nf_c      <- nf_counts_all[, nf_shared, drop=FALSE]
+  nf_m      <- nf_meta_all[nf_shared, , drop=FALSE]
+  nf_ref    <- ref_condition_for(nf_strain)
+  cat("  Cells:", ncol(nf_c), "| reference condition:", nf_ref, "\n")
+
+  if (!(nf_ref %in% nf_m$condition)) {
+    cat("  SKIPPED: reference condition absent from this plate.\n")
+    next
+  }
+
+  # Same filter as the main loop, violin-gene exemption included, so the gene
+  # universes are built the same way.
+  nf_keep <- rowSums(nf_c) >= 10 | rownames(nf_c) %in% violin_keep_ens
+  nf_c    <- nf_c[nf_keep, , drop=FALSE]
+  cat("  Genes passing filter:", nrow(nf_c), "\n")
+
+  nf_res <- tryCatch({
+    nf_m$condition <- relevel(factor(nf_m$condition), ref=nf_ref)
+    nf_dds <- DESeqDataSetFromMatrix(
+      countData = round(as.matrix(nf_c)),
+      colData   = nf_m,
+      design    = ~ condition
+    )
+
+    # Size factors from this plate's reference wells only — same estimator as
+    # the main loop.
+    nf_ref_cells  <- nf_m$cell_id[nf_m$condition == nf_ref]
+    nf_ref_counts <- as.matrix(nf_c[, nf_ref_cells, drop=FALSE])
+    nf_ref_nz     <- rowSums(nf_ref_counts == 0) == 0
+
+    # The reference wells are unfiltered here, so ONE near-empty reference cell
+    # can collapse the "nonzero in every reference cell" gene set and reduce
+    # the size factors to a median over a handful of genes. The MHCII filter
+    # removed most such cells in the main loop, so this failure mode is new to
+    # this section and is reported rather than left silent.
+    cat("  Reference cells:", length(nf_ref_cells),
+        "| genes nonzero in all of them:", sum(nf_ref_nz), "\n")
+    if (sum(nf_ref_nz) < 200) {
+      cat("  *** WARNING: only", sum(nf_ref_nz),
+          "genes underpin this plate's size factors --\n",
+          "      normalization is unstable. Usually one near-empty reference\n",
+          "      well; check the depth diagnostic above. ***\n")
+    }
+    if (sum(nf_ref_nz) == 0)
+      stop("no gene is nonzero across all reference cells")
+
+    nf_geo <- exp(rowMeans(log(nf_ref_counts[nf_ref_nz, , drop=FALSE])))
+    nf_sf  <- apply(as.matrix(nf_c), 2, function(cell_col) {
+      r <- cell_col[nf_ref_nz] / nf_geo
+      median(r[is.finite(r) & r > 0], na.rm=TRUE)
+    })
+    nf_sf[nf_sf <= 0 | !is.finite(nf_sf)] <- 1
+    sizeFactors(nf_dds) <- nf_sf
+
+    nf_dds <- DESeq(nf_dds, test="Wald", fitType="parametric", quiet=TRUE)
+    assay(varianceStabilizingTransformation(nf_dds, blind=FALSE))
+  }, error = function(e) {
+    cat("  *** FAILED:", conditionMessage(e), "-- plate excluded ***\n")
+    NULL
+  })
+
+  if (is.null(nf_res)) next
+  nf_expr_list[[nf_strain]] <- nf_res
+  nf_meta_list[[nf_strain]] <- nf_m
+  cat("  VST complete:", nrow(nf_res), "genes x", ncol(nf_res), "cells\n")
+}
+
+if (length(nf_expr_list) < 2) {
+  cat("\nFewer than 2 plates produced a VST matrix - skipping NoMHCIIFilter UMAP.\n")
+} else {
+
+nf_common <- Reduce(intersect, lapply(nf_expr_list, rownames))
+cat("\nGenes common across all plates (no MHCII filter):", length(nf_common), "\n")
+
+nf_expr <- do.call(cbind, lapply(nf_expr_list,
+                                 function(e) e[nf_common, , drop=FALSE]))
+nf_meta <- do.call(rbind, nf_meta_list)
+nf_meta$condition    <- as.character(nf_meta$condition)
+nf_meta$strain       <- as.character(nf_meta$strain)
+nf_meta$strain_group <- as.character(nf_meta$strain_group)
+rownames(nf_meta)    <- nf_meta$cell_id
+nf_meta <- nf_meta[colnames(nf_expr), , drop=FALSE]
+stopifnot(identical(rownames(nf_meta), colnames(nf_expr)))
+cat("Total cells in NoMHCIIFilter matrix:", ncol(nf_expr), "\n")
+
+# HVG -> PCA -> UMAP (layout only)
+nf_vars <- apply(nf_expr, 1, var)
+nf_hvg  <- names(sort(nf_vars, decreasing=TRUE))[1:min(N_HVG, length(nf_vars))]
+cat("HVGs selected:", length(nf_hvg), "\n")
+cat("Running PCA + UMAP on HVG matrix (visualization)...\n")
+nf_umap <- run_umap(nf_expr[nf_hvg, , drop=FALSE])
+
+nf_df <- data.frame(nf_umap, cell_id=rownames(nf_umap), stringsAsFactors=FALSE)
+
+# ==============================================================================
+# Per-cell lineage typing
+# ==============================================================================
+# Every cell gets its OWN cell-type label, independent of any clustering.
+#
+# WHY NOT CLUSTER-THEN-LABEL: fibroblasts do not form their own Leiden cluster
+# in this dataset (they are ~5% of cells and sit inside the endothelial/stromal
+# cluster), so a cluster-level label cannot produce a fibroblast group at all.
+# Scoring each cell directly against curated panels recovers them.
+#
+# Score = mean z-score (across all cells here) of that panel's genes in that
+# cell. Label = highest-scoring panel. Z-scoring per gene stops one highly
+# expressed marker from dominating a panel.
+cat("\nTyping each cell against curated lineage panels...\n")
+
+# TYPING RUNS ON RAW-COUNT log-CPM, NOT ON nf_expr.
+#
+# nf_expr is the intersection of genes surviving every plate's rowSums >= 10
+# filter, so one plate's honest zero deletes a gene for all plates. NODCD31 is a
+# pure CD31 sort with no fibroblasts and therefore 0 counts for Col1a1/Col1a2 --
+# scoring on nf_expr found only 2/10 fibroblast markers and 0/7 pericyte
+# markers, which silently mistypes exactly the population this analysis is
+# about. (Same failure mode as the Clarke VAF/VRC orientation bug; see README.)
+#
+# Which lineage a cell belongs to is a property of that cell. It must not depend
+# on which other plates were sequenced, so it is computed from that cell's own
+# raw counts, where every gene is still present.
+nf_type_lib  <- pmax(colSums(nf_counts_all), 1)
+nf_type_lcpm <- log1p(sweep(nf_counts_all, 2, nf_type_lib, "/") * 1e6)
+nf_z_all     <- t(scale(t(nf_type_lcpm)))
+nf_z_all     <- nf_z_all[rowSums(is.na(nf_z_all)) == 0, , drop=FALSE]
+cat("  Typing matrix:", nrow(nf_z_all), "genes x", ncol(nf_z_all),
+    "cells (raw-count log-CPM, not the cross-plate intersection)\n")
+
+nf_panel_scores <- sapply(names(NF_LINEAGE_PANELS), function(lin) {
+  ens <- sym_to_ens[NF_LINEAGE_PANELS[[lin]]]
+  ens <- ens[!is.na(ens) & ens %in% rownames(nf_z_all)]
+  cat(sprintf("  %-16s %d/%d panel genes found\n", lin, length(ens),
+              length(NF_LINEAGE_PANELS[[lin]])))
+  if (length(ens) < 3) {
+    msg <- sprintf("lineage panel '%s' resolved to only %d marker(s)",
+                   lin, length(ens))
+    if (lin %in% NF_FOCUS_TYPES)
+      stop(msg, " -- it is one of NF_FOCUS_TYPES, so every downstream violin ",
+           "and count for it would be wrong. Refusing to continue.")
+    cat("    *** WARNING:", msg, "- not trustworthy ***\n")
+  }
+  if (length(ens) == 0) return(rep(NA_real_, ncol(nf_z_all)))
+  colMeans(nf_z_all[ens, , drop=FALSE])
+})
+rownames(nf_panel_scores) <- colnames(nf_z_all)
+
+# Top and runner-up per cell. The margin between them is the confidence: a cell
+# scoring nearly equally for two lineages has not really been assigned one, and
+# is flagged rather than silently counted into whichever won by a hair.
+nf_sorted   <- t(apply(nf_panel_scores, 1, function(r) {
+  o <- order(r, decreasing=TRUE); c(o[1], o[2], r[o[1]], r[o[2]]) }))
+nf_type     <- colnames(nf_panel_scores)[nf_sorted[, 1]]
+nf_type2    <- colnames(nf_panel_scores)[nf_sorted[, 2]]
+nf_score    <- nf_sorted[, 3]
+nf_margin   <- nf_sorted[, 3] - nf_sorted[, 4]
+nf_ambig    <- nf_margin < NF_AMBIGUOUS_MARGIN
+names(nf_type) <- names(nf_margin) <- rownames(nf_panel_scores)
+
+cat("\n  Cells per type (argmax of panel scores):\n")
+print(table(nf_type))
+cat("  Ambiguous (margin <", NF_AMBIGUOUS_MARGIN, "):", sum(nf_ambig),
+    "of", length(nf_ambig), "\n")
+
+nf_df$cell_type    <- nf_type[nf_df$cell_id]
+nf_df$type_score   <- round(nf_score[nf_df$cell_id], 4)
+nf_df$runner_up    <- nf_type2[match(nf_df$cell_id, rownames(nf_panel_scores))]
+nf_df$type_margin  <- round(nf_margin[nf_df$cell_id], 4)
+nf_df$ambiguous    <- nf_ambig[nf_df$cell_id]
+
+# ==============================================================================
+# UMAP colored by per-cell type
+# ==============================================================================
+nf_type_levels <- sort(unique(nf_df$cell_type))
+nf_type_pal    <- setNames(scales::hue_pal()(length(nf_type_levels)),
+                           nf_type_levels)
+
+nf_p_type <- ggplot(nf_df, aes(x=UMAP1, y=UMAP2, color=cell_type)) +
+  geom_point(size=1.8, alpha=0.85) +
+  scale_color_manual(values=nf_type_pal) +
+  labs(
+    title    = paste0("All sorted cells - ", nrow(nf_df), " cells by cell type"),
+    subtitle = paste0("n=", nrow(nf_df), " (NO MHCII filter; >=",
+                      NOFILT_MIN_GENES, " genes detected)\n",
+                      "Per-cell lineage panel score | ", sum(nf_df$ambiguous),
+                      " ambiguous (margin < ", NF_AMBIGUOUS_MARGIN, ")"),
+    color    = "Cell type"
+  ) +
+  theme_bw(base_size=12) +
+  theme(plot.title=element_text(face="bold", size=12),
+        plot.subtitle=element_text(size=9, color="grey40"),
+        panel.grid.minor=element_blank(), aspect.ratio=1)
+
+nf_type_path <- file.path(nf_out_dir,
+                          paste0("umap_all", nrow(nf_df), "_by_cell_type.pdf"))
+ggsave(nf_type_path, nf_p_type, width=7.5, height=6)
+cat("Saved:", nf_type_path, "\n")
+
+# ==============================================================================
+# Violin plots: genes of interest within the focus cell types
+# ==============================================================================
+cat("\nGenerating violin plots for", paste(NF_GENES_OF_INTEREST, collapse=", "),
+    "in", paste(NF_FOCUS_TYPES, collapse=" / "), "...\n")
+
+nf_goi_ens <- sym_to_ens[NF_GENES_OF_INTEREST]
+names(nf_goi_ens) <- NF_GENES_OF_INTEREST
+nf_goi_missing <- NF_GENES_OF_INTEREST[is.na(nf_goi_ens) |
+                                         !(nf_goi_ens %in% rownames(nf_expr))]
+nf_goi_ens <- nf_goi_ens[!is.na(nf_goi_ens) & nf_goi_ens %in% rownames(nf_expr)]
+if (length(nf_goi_missing) > 0)
+  cat("  Not in the matrix:", paste(nf_goi_missing, collapse=", "), "\n")
+
+nf_focus <- intersect(NF_FOCUS_TYPES, nf_df$cell_type)
+if (length(setdiff(NF_FOCUS_TYPES, nf_focus)) > 0)
+  cat("  No cells typed as:",
+      paste(setdiff(NF_FOCUS_TYPES, nf_focus), collapse=", "), "\n")
+
+# Raw counts for the same cells, used for detection rates. Detection is the
+# thing that makes a violin readable here: VST is compressive, so a gene that is
+# off in most cells piles up at the floor and the violin shape alone cannot tell
+# "absent" from "present in a minority".
+nf_goi_counts <- nf_counts_all[intersect(nf_goi_ens, rownames(nf_counts_all)),
+                               nf_df$cell_id, drop=FALSE]
+nf_lib_goi    <- colSums(nf_counts_all[, nf_df$cell_id, drop=FALSE])
+
+nf_goi_long <- do.call(rbind, lapply(names(nf_goi_ens), function(sym) {
+  ens <- nf_goi_ens[[sym]]
+  cnt <- if (ens %in% rownames(nf_goi_counts))
+           nf_goi_counts[ens, nf_df$cell_id] else rep(NA_integer_, nrow(nf_df))
+  data.frame(
+    cell_id     = nf_df$cell_id,
+    cell_type   = nf_df$cell_type,
+    ambiguous   = nf_df$ambiguous,
+    gene_symbol = sym,
+    ensembl_id  = ens,
+    VST         = round(nf_expr[ens, nf_df$cell_id], 4),
+    raw_count   = as.integer(cnt),
+    CPM         = round(cnt / nf_lib_goi * 1e6, 3),
+    detected    = !is.na(cnt) & cnt > 0,
+    stringsAsFactors = FALSE)
+}))
+
+if (length(nf_focus) == 0 || length(nf_goi_ens) == 0) {
+  cat("  Nothing to plot - skipping violins.\n")
+} else {
+  nf_vln_src <- nf_goi_long[nf_goi_long$cell_type %in% nf_focus, ]
+  nf_vln_src$cell_type <- factor(nf_vln_src$cell_type, levels=nf_focus)
+
+  nf_vln_plots <- lapply(names(nf_goi_ens), function(sym) {
+    d <- nf_vln_src[nf_vln_src$gene_symbol == sym, ]
+    # Per-type detection, appended to the axis labels. Without this a panel of
+    # all-zero cells is indistinguishable from a panel of low-but-real values.
+    lab <- sapply(levels(d$cell_type), function(ct) {
+      dd <- d[d$cell_type == ct, ]
+      sprintf("%s\nn=%d, %d det (%.0f%%)", ct, nrow(dd), sum(dd$detected),
+              100 * mean(dd$detected))
+    })
+    ggplot(d, aes(x=cell_type, y=VST, fill=cell_type)) +
+      geom_violin(trim=TRUE, scale="width", alpha=0.85, linewidth=0.3) +
+      geom_jitter(width=0.15, size=1.1, alpha=0.6, color="grey15") +
+      scale_fill_manual(values=nf_type_pal) +
+      scale_x_discrete(labels=lab) +
+      labs(title=sym,
+           subtitle=sprintf("detected (>=1 read) in %d/%d of these cells",
+                            sum(d$detected), nrow(d)),
+           x=NULL, y="VST expression") +
+      theme_bw(base_size=11) +
+      theme(plot.title=element_text(face="bold.italic", size=12),
+            plot.subtitle=element_text(size=8, color="grey40"),
+            legend.position="none", panel.grid.minor=element_blank())
+  })
+
+  nf_vln_panel <- wrap_plots(nf_vln_plots,
+                             ncol=min(2, length(nf_vln_plots))) +
+    plot_annotation(
+      title    = paste0("Gene expression by cell type - ",
+                        paste(nf_focus, collapse=" vs ")),
+      subtitle = paste0("n=", nrow(nf_df), " cells >= ", NOFILT_MIN_GENES,
+                        " genes | no MHCII filter | per-cell lineage panel typing"),
+      theme    = theme(plot.title=element_text(face="bold", size=13),
+                       plot.subtitle=element_text(size=9, color="grey40")))
+
+  nf_vln_path <- file.path(nf_out_dir, "violin_GOI_by_cell_type.pdf")
+  ggsave(nf_vln_path, nf_vln_panel,
+         width=5.5 * min(2, length(nf_vln_plots)),
+         height=5 * ceiling(length(nf_vln_plots) / 2))
+  cat("Saved:", nf_vln_path, "\n")
+}
+
+# ==============================================================================
+# Excel: genes of interest quantified per cell, plus a full-matrix CSV
+# ==============================================================================
+cat("\nWriting per-cell expression workbook...\n")
+
+nf_annot <- data.frame(
+  cell_id          = nf_df$cell_id,
+  strain           = nf_meta[nf_df$cell_id, "strain"],
+  condition        = nf_meta[nf_df$cell_id, "condition"],
+  cell_type        = nf_df$cell_type,
+  type_score       = nf_df$type_score,
+  runner_up        = nf_df$runner_up,
+  type_margin      = nf_df$type_margin,
+  ambiguous        = nf_df$ambiguous,
+  genes_detected   = as.integer(colSums(nf_counts_all[, nf_df$cell_id] > 0)),
+  library_size     = as.integer(colSums(nf_counts_all[, nf_df$cell_id])),
+  UMAP1            = round(nf_df$UMAP1, 4),
+  UMAP2            = round(nf_df$UMAP2, 4),
+  stringsAsFactors = FALSE)
+nf_annot <- nf_annot[order(nf_annot$cell_type, -nf_annot$type_score), ]
+
+# Literal genes x cells matrix, as requested: one row per gene of interest, one
+# column per passing cell, with the cell's type carried in a header row.
+nf_wide_vst <- as.data.frame(nf_expr[nf_goi_ens, nf_annot$cell_id, drop=FALSE])
+nf_wide_vst <- cbind(gene_symbol = names(nf_goi_ens),
+                     ensembl_id  = unname(nf_goi_ens), nf_wide_vst)
+nf_type_hdr <- data.frame(gene_symbol="CELL_TYPE", ensembl_id="",
+                          stringsAsFactors=FALSE)
+nf_type_hdr <- cbind(nf_type_hdr,
+                     setNames(as.data.frame(as.list(nf_annot$cell_type),
+                                            stringsAsFactors=FALSE),
+                              nf_annot$cell_id))
+nf_wide_out <- rbind(nf_type_hdr, nf_wide_vst)
+
+# Per gene x cell type summary
+nf_summary <- nf_goi_long %>%
+  group_by(gene_symbol, cell_type) %>%
+  summarise(n_cells=n(), n_detected=sum(detected),
+            pct_detected=round(100*mean(detected), 1),
+            mean_VST=round(mean(VST), 4), median_VST=round(median(VST), 4),
+            mean_CPM=round(mean(CPM, na.rm=TRUE), 2),
+            median_CPM_detected=round(
+              suppressWarnings(median(CPM[detected], na.rm=TRUE)), 2),
+            .groups="drop") %>%
+  arrange(gene_symbol, desc(pct_detected)) %>%
+  as.data.frame()
+cat("\n  Genes of interest by cell type:\n"); print(nf_summary, row.names=FALSE)
+
+wb_nf <- createWorkbook()
+addWorksheet(wb_nf, "GOI_by_cell_long")
+writeData(wb_nf, "GOI_by_cell_long",
+          nf_goi_long[order(nf_goi_long$gene_symbol,
+                            nf_goi_long$cell_type,
+                            -nf_goi_long$VST), ])
+setColWidths(wb_nf, "GOI_by_cell_long", cols=1:9,
+             widths=c(26,16,11,13,20,10,11,11,10))
+addWorksheet(wb_nf, "GOI_genes_x_cells_VST")
+writeData(wb_nf, "GOI_genes_x_cells_VST", nf_wide_out)
+setColWidths(wb_nf, "GOI_genes_x_cells_VST", cols=1:2, widths=c(14,20))
+addWorksheet(wb_nf, "Summary_by_cell_type")
+writeData(wb_nf, "Summary_by_cell_type", nf_summary)
+setColWidths(wb_nf, "Summary_by_cell_type", cols=1:9, widths=14)
+addWorksheet(wb_nf, "Cell_annotations")
+writeData(wb_nf, "Cell_annotations", nf_annot)
+setColWidths(wb_nf, "Cell_annotations", cols=1:12, widths=c(26,13,26,16,11,16,12,11,15,14,10,10))
+addWorksheet(wb_nf, "Panel_definitions")
+writeData(wb_nf, "Panel_definitions", data.frame(
+  cell_type = rep(names(NF_LINEAGE_PANELS), lengths(NF_LINEAGE_PANELS)),
+  marker    = unlist(NF_LINEAGE_PANELS, use.names=FALSE),
+  stringsAsFactors=FALSE))
+addWorksheet(wb_nf, "Notes")
+writeData(wb_nf, "Notes", data.frame(Note=c(
+  paste0("Cells: every cell with >= ", NOFILT_MIN_GENES,
+         " genes detected. No MHCII filter is applied anywhere in this folder."),
+  "cell_type is assigned PER CELL: mean z-scored expression of each lineage panel, highest score wins. It does not come from clustering.",
+  paste0("type_margin = top score minus runner-up. ambiguous = margin < ",
+         NF_AMBIGUOUS_MARGIN, "; those cells are counted in their type but are not confidently assigned."),
+  "VST = variance-stabilized, per-plate DESeq2 normalized (the pipeline's standard unit). CPM and raw_count come from the same cell's raw counts.",
+  "IMPORTANT: VST is compressive. A gene off in most cells piles up at the VST floor, so a low mean_VST cannot be read as absence. Always check n_detected / pct_detected.",
+  "For any gene not listed here, see expression_all_genes_by_cell_VST.csv and expression_all_genes_by_cell_counts.csv in this folder; columns are cell_id, matching Cell_annotations.",
+  "Panels are curated and broad; they cannot identify a cell type they do not contain."),
+  stringsAsFactors=FALSE))
+setColWidths(wb_nf, "Notes", cols=1, widths=130)
+saveWorkbook(wb_nf, file.path(nf_out_dir, "GOI_expression_by_cell.xlsx"),
+             overwrite=TRUE)
+cat("  Saved: GOI_expression_by_cell.xlsx\n")
+
+# -- Full matrices for drill-down ----------------------------------------------
+# Written as CSV rather than extra Excel sheets: ~12k genes x 454 cells opens
+# and searches far faster as a flat file, and stays under Excel's column limit
+# either way.
+nf_full_vst <- data.frame(
+  ensembl_id  = rownames(nf_expr),
+  gene_symbol = to_sym(rownames(nf_expr)),
+  round(as.data.frame(nf_expr[, nf_annot$cell_id, drop=FALSE]), 4),
+  check.names = FALSE, stringsAsFactors = FALSE)
+write.csv(nf_full_vst,
+          file.path(nf_out_dir, "expression_all_genes_by_cell_VST.csv"),
+          row.names=FALSE)
+cat("  Saved: expression_all_genes_by_cell_VST.csv (",
+    nrow(nf_full_vst), "genes x", nrow(nf_annot), "cells )\n")
+
+nf_full_cnt <- data.frame(
+  ensembl_id  = rownames(nf_counts_all),
+  gene_symbol = to_sym(rownames(nf_counts_all)),
+  as.data.frame(nf_counts_all[, nf_annot$cell_id, drop=FALSE]),
+  check.names = FALSE, stringsAsFactors = FALSE)
+write.csv(nf_full_cnt,
+          file.path(nf_out_dir, "expression_all_genes_by_cell_counts.csv"),
+          row.names=FALSE)
+cat("  Saved: expression_all_genes_by_cell_counts.csv (",
+    nrow(nf_full_cnt), "genes x", nrow(nf_annot), "cells )\n")
+
+
+# ==============================================================================
+# Legacy cluster-centric outputs (Leiden clusters, marker heatmap, cluster
+# identity workbooks). Superseded by the per-cell typing above, which is what
+# the violins and the workbook now use. Kept, not deleted: set
+# NF_RUN_CLUSTER_OUTPUTS <- TRUE to restore them exactly as before.
+# ==============================================================================
+if (NF_RUN_CLUSTER_OUTPUTS) {
+
+# All-gene PCA -> Leiden (cluster assignment)
+cat("Running PCA on all", nrow(nf_expr), "genes for clustering...\n")
+nf_pca <- prcomp(t(nf_expr), center=TRUE, scale.=FALSE)
+nf_cum <- cumsum(nf_pca$sdev^2 / sum(nf_pca$sdev^2))
+nf_npc <- max(2, which(nf_cum >= VAR_THRESHOLD)[1])
+cat("PCs selected (all-gene):", nf_npc,
+    sprintf("(%.1f%% variance explained)\n", nf_cum[nf_npc]*100))
+cat("Running Leiden clustering on all-gene PCs (resolution=",
+    LEIDEN_RESOLUTION, ")...\n", sep="")
+nf_leiden     <- run_leiden(nf_pca$x[, 1:nf_npc, drop=FALSE])
+nf_df$cluster <- as.character(nf_leiden)
+nf_nclust     <- length(unique(nf_df$cluster))
+cat("Clusters found:", nf_nclust, "\n")
+cat("Cells per cluster:\n"); print(table(nf_df$cluster))
+
+# -- UMAP colored by Leiden cluster --------------------------------------------
+nf_pal <- setNames(scales::hue_pal()(nf_nclust), sort(unique(nf_df$cluster)))
+
+nf_plot <- ggplot(nf_df, aes(x=UMAP1, y=UMAP2, color=cluster)) +
+  geom_point(size=1.8, alpha=0.8) +
+  scale_color_manual(values=nf_pal) +
+  labs(
+    title    = paste0("All sorted cells - ", nrow(nf_df),
+                      " cells by Leiden cluster"),
+    # Wrapped onto two lines: as a single line this overflows the 7in canvas
+    # and the resolution/cluster count get clipped off the right edge.
+    subtitle = paste0("n=", nrow(nf_df), " (NO MHCII filter; >=",
+                      NOFILT_MIN_GENES, " genes detected)\n",
+                      "UMAP: top ", N_HVG,
+                      " HVGs | Clusters: all-gene PCA | resolution=",
+                      LEIDEN_RESOLUTION, " | ", nf_nclust, " clusters"),
+    color    = "Cluster"
+  ) +
+  theme_bw(base_size=12) +
+  theme(
+    plot.title       = element_text(face="bold", size=12),
+    plot.subtitle    = element_text(size=9, color="grey40"),
+    panel.grid.minor = element_blank(),
+    aspect.ratio     = 1
+  )
+
+nf_path <- file.path(nf_out_dir,
+                     paste0("umap_nomhciifilter_all", nrow(nf_df),
+                            "_by_cluster.pdf"))
+ggsave(nf_path, nf_plot, width=7, height=6)
+cat("Saved:", nf_path, "\n")
+
+# ------------------------------------------------------------------------------
+# Cluster marker heatmap
+# ------------------------------------------------------------------------------
+# Same construction as combined_plots/heatmap_cluster_markers.pdf: one-vs-rest
+# Wilcoxon per cluster (one-sided, upregulated only, pre-filtered to
+# log2FC >= MIN_LOG2FC, BH-corrected), top TOP_HEATMAP genes per cluster
+# deduplicated first-occurrence-wins, per-gene z-scored VST capped at +/-2.5,
+# cells ordered by cluster.
+#
+# Markers are computed in memory and NOT written to Excel — this folder is
+# deliberately plot-only for now. Reuses MIN_LOG2FC / MAX_PADJ / TOP_HEATMAP
+# from the combined marker section so the two heatmaps stay comparable.
+cat("\nRunning Wilcoxon marker gene analysis on NoMHCIIFilter clusters...\n")
+
+nf_cluster_vec <- setNames(as.character(nf_df$cluster), nf_df$cell_id)
+nf_cl_levels   <- sort(unique(as.integer(nf_cluster_vec)))
+nf_markers     <- list()
+
+for (nf_cl in nf_cl_levels) {
+  nf_lab   <- as.character(nf_cl)
+  nf_in    <- names(nf_cluster_vec)[nf_cluster_vec == nf_lab]
+  nf_out   <- names(nf_cluster_vec)[nf_cluster_vec != nf_lab]
+  cat("  Cluster", nf_lab, "vs rest (n=", length(nf_in), ")...\n")
+
+  nf_mean_in  <- rowMeans(nf_expr[, nf_in,  drop=FALSE])
+  nf_mean_out <- rowMeans(nf_expr[, nf_out, drop=FALSE])
+  nf_l2fc     <- nf_mean_in - nf_mean_out      # VST difference == log2FC
+
+  nf_cand <- names(nf_l2fc)[nf_l2fc >= MIN_LOG2FC]
+  cat("    Candidates (log2FC >=", MIN_LOG2FC, "):", length(nf_cand), "\n")
+  if (length(nf_cand) == 0) { nf_markers[[nf_lab]] <- data.frame(); next }
+
+  nf_p  <- sapply(nf_cand, function(g)
+             wilcox.test(nf_expr[g, nf_in], nf_expr[g, nf_out],
+                         alternative="greater", exact=FALSE)$p.value)
+  nf_pa <- p.adjust(nf_p, method="BH")
+
+  nf_markers[[nf_lab]] <- data.frame(
+      ensembl_id  = nf_cand,
+      gene_symbol = to_sym(nf_cand),
+      log2FC      = round(nf_l2fc[nf_cand], 4),
+      padj        = signif(nf_pa, 4),
+      stringsAsFactors = FALSE) %>%
+    filter(padj < MAX_PADJ) %>%
+    arrange(desc(log2FC)) %>%
+    distinct(gene_symbol, .keep_all=TRUE)
+
+  cat("    Significant markers:", nrow(nf_markers[[nf_lab]]),
+      "| Top gene:", if (nrow(nf_markers[[nf_lab]]) > 0)
+                       nf_markers[[nf_lab]]$gene_symbol[1] else "none", "\n")
+}
+
+cat("Generating NoMHCIIFilter cluster marker heatmap...\n")
+nf_hm_genes <- c()
+for (nf_lab in as.character(nf_cl_levels)) {
+  if (!is.null(nf_markers[[nf_lab]]) && nrow(nf_markers[[nf_lab]]) > 0) {
+    nf_top <- nf_markers[[nf_lab]]$gene_symbol[
+                !nf_markers[[nf_lab]]$gene_symbol %in% nf_hm_genes]
+    nf_hm_genes <- c(nf_hm_genes, head(nf_top, TOP_HEATMAP))
+  }
+}
+cat("Total unique genes in heatmap:", length(nf_hm_genes), "\n")
+
+nf_hm_ens <- sym_to_ens[nf_hm_genes]
+nf_hm_ens <- nf_hm_ens[!is.na(nf_hm_ens) & nf_hm_ens %in% rownames(nf_expr)]
+
+if (length(nf_hm_ens) < 2) {
+  cat("  Too few mappable marker genes - skipping heatmap.\n")
+} else {
+  nf_cell_order <- nf_df$cell_id[order(as.integer(as.character(nf_df$cluster)))]
+  nf_heat       <- nf_expr[nf_hm_ens, nf_cell_order, drop=FALSE]
+  rownames(nf_heat) <- to_sym(rownames(nf_heat))
+
+  nf_z <- t(scale(t(nf_heat)))
+  nf_z[nf_z >  2.5] <-  2.5
+  nf_z[nf_z < -2.5] <- -2.5
+  # A gene with zero variance across cells z-scores to NaN, which Heatmap()
+  # renders as a blank row rather than failing; drop those instead.
+  nf_z <- nf_z[rowSums(is.na(nf_z)) == 0, , drop=FALSE]
+
+  nf_anno <- as.character(nf_df$cluster[match(nf_cell_order, nf_df$cell_id)])
+  nf_ha   <- HeatmapAnnotation(
+    Cluster = nf_anno,
+    col     = list(Cluster = nf_pal),
+    annotation_name_side = "left",
+    annotation_legend_param = list(Cluster = list(title="Cluster", nrow=1))
+  )
+
+  nf_ht <- Heatmap(
+    nf_z,
+    name                 = "Z-score",
+    col                  = colorRamp2(c(-2.5, 0, 2.5),
+                                      c("#3D0751", "#1A1A1A", "#F5E642")),
+    top_annotation       = nf_ha,
+    show_column_names    = FALSE,
+    show_row_names       = TRUE,
+    row_names_gp         = gpar(fontsize=7, fontface="italic"),
+    cluster_rows         = FALSE,
+    cluster_columns      = FALSE,
+    row_title            = NULL,
+    column_title         = paste0("NoMHCIIFilter cluster markers - ",
+                                  nrow(nf_z), " genes x ", ncol(nf_z),
+                                  " cells (>=", NOFILT_MIN_GENES, " genes/cell)"),
+    column_title_gp      = gpar(fontsize=12, fontface="bold"),
+    heatmap_legend_param = list(title="Z-score\n(VST)",
+                                legend_height=unit(3, "cm")),
+    use_raster           = TRUE,
+    raster_quality       = 5,
+    raster_device        = HT_RASTER_DEVICE
+  )
+
+  nf_hm_path <- file.path(nf_out_dir, "heatmap_cluster_markers.pdf")
+  pdf(nf_hm_path, width=16, height=max(8, nrow(nf_z) * 0.18 + 3))
+  draw(nf_ht, heatmap_legend_side="right", annotation_legend_side="bottom")
+  dev.off()
+  cat("Saved:", nf_hm_path, "\n")
+}
+
+# ------------------------------------------------------------------------------
+# Per-cluster violin plots for selected genes
+# ------------------------------------------------------------------------------
+# Unlike the combined panel, this reads straight from nf_expr: every cell in
+# this analysis lives in that one matrix, so there is no per-plate fallback to
+# assemble.
+#
+# Each panel reports the detection rate alongside n. VST is a compressive
+# log-like scale, so a gene expressed strongly in a minority of cells sits near
+# the VST floor and reads as absent -- the detection rate is what distinguishes
+# "off everywhere" from "on in a subset". Detection is counted from raw counts
+# (>=1 read), not from VST.
+cat("\nGenerating NoMHCIIFilter per-cluster violin plots...\n")
+
+nf_vln_ens <- sym_to_ens[NF_VIOLIN_GENES]
+names(nf_vln_ens) <- NF_VIOLIN_GENES
+nf_vln_missing <- NF_VIOLIN_GENES[is.na(nf_vln_ens) |
+                                    !(nf_vln_ens %in% rownames(nf_expr))]
+nf_vln_ens <- nf_vln_ens[!is.na(nf_vln_ens) & nf_vln_ens %in% rownames(nf_expr)]
+
+if (length(nf_vln_missing) > 0) {
+  cat("  Not present in the NoMHCIIFilter matrix:",
+      paste(nf_vln_missing, collapse=", "), "\n")
+  cat("  (add them to VIOLIN_GENES so they survive the per-plate count filter)\n")
+}
+
+if (length(nf_vln_ens) == 0) {
+  cat("  No requested violin genes available - skipping.\n")
+} else {
+  nf_vln_df <- as.data.frame(t(nf_expr[nf_vln_ens, nf_df$cell_id, drop=FALSE])) %>%
+    tibble::rownames_to_column("cell_id") %>%
+    pivot_longer(-cell_id, names_to="ensembl_id", values_to="VST") %>%
+    left_join(nf_df[, c("cell_id", "cluster")], by="cell_id") %>%
+    mutate(cluster = factor(cluster,
+             levels=sort(unique(as.integer(as.character(nf_df$cluster))))))
+
+  nf_vln_plots <- lapply(seq_along(nf_vln_ens), function(i) {
+    ens <- nf_vln_ens[[i]]
+    sym <- names(nf_vln_ens)[i]
+    dfg <- nf_vln_df %>% filter(ensembl_id == ens)
+
+    # Detection rate from raw counts, restricted to the cells actually plotted.
+    det_cells <- intersect(colnames(nf_counts_all), dfg$cell_id)
+    pct_det   <- if (ens %in% rownames(nf_counts_all) && length(det_cells) > 0)
+                   100 * mean(nf_counts_all[ens, det_cells] > 0) else NA_real_
+
+    ggplot(dfg, aes(x=cluster, y=VST, fill=cluster)) +
+      geom_violin(trim=TRUE, scale="width", alpha=0.85, linewidth=0.3) +
+      geom_jitter(width=0.15, size=0.6, alpha=0.35, color="grey20") +
+      scale_fill_manual(values=nf_pal) +
+      labs(
+        title    = sym,
+        subtitle = paste0("n=", nrow(dfg), " cells",
+                          if (!is.na(pct_det))
+                            sprintf(" | detected (>=1 read) in %.1f%%", pct_det)
+                          else ""),
+        x = "Leiden Cluster", y = "VST expression"
+      ) +
+      theme_bw(base_size=11) +
+      theme(
+        plot.title       = element_text(face="bold.italic", size=11),
+        plot.subtitle    = element_text(size=7.5, color="grey40"),
+        legend.position  = "none",
+        panel.grid.minor = element_blank()
+      )
+  })
+
+  nf_vln_panel <- wrap_plots(nf_vln_plots, ncol=min(2, length(nf_vln_plots))) +
+    plot_annotation(
+      title    = "NoMHCIIFilter - gene expression across Leiden clusters",
+      subtitle = paste0("VST-normalized | n=", nrow(nf_df), " cells | ",
+                        nf_nclust, " clusters | no MHCII filter, >=",
+                        NOFILT_MIN_GENES, " genes/cell"),
+      theme    = theme(
+        plot.title    = element_text(face="bold", size=13),
+        plot.subtitle = element_text(size=9, color="grey40")
+      )
+    )
+
+  nf_vln_path <- file.path(nf_out_dir, "violin_plots_by_cluster.pdf")
+  ggsave(nf_vln_path, nf_vln_panel,
+         width=5.5 * min(2, length(nf_vln_plots)),
+         height=5 * ceiling(length(nf_vln_plots) / 2))
+  cat("Saved:", nf_vln_path, "\n")
+
+  # Per-cluster medians, so the panel can be read numerically too.
+  cat("  Median VST by cluster:\n")
+  print(nf_vln_df %>%
+          mutate(gene=to_sym(ensembl_id)) %>%
+          group_by(gene, cluster) %>%
+          summarise(n=n(), median_VST=round(median(VST), 3), .groups="drop") %>%
+          as.data.frame())
+}
+
+# ------------------------------------------------------------------------------
+# Cluster identity / lineage classification
+# ------------------------------------------------------------------------------
+# Three complementary answers to "what is this cluster?", weakest assumption
+# first:
+#
+#   1. lineage panels  - curated canonical markers, broad lineages. Directly
+#                        answers "endothelial vs fibroblast vs hematopoietic".
+#                        Transparent, but only as good as the panels.
+#   2. CellMarker 2.0  - Fisher/Jaccard of this cluster's Wilcoxon markers
+#                        against the CellMarker mouse database. Unsupervised
+#                        w.r.t. the panels, but returns very specific cell-type
+#                        names that can be awkward to map onto a lineage.
+#   3. Mouse Cell Atlas- genome-wide Pearson of each cluster's mean profile
+#                        against 713 MCA reference profiles. No marker list at
+#                        all.
+#
+# Agreement across all three is the thing to trust; disagreement is reported
+# rather than resolved silently.
+cat("\n==============================================================\n")
+cat("Classifying NoMHCIIFilter clusters...\n")
+cat("==============================================================\n")
+
+# -- 1. Curated lineage panels -------------------------------------------------
+# Mouse symbols. Panels are intentionally broad and non-overlapping; a gene that
+# marks two lineages here would make the argmax call meaningless.
+# (NF_LINEAGE_PANELS is defined in the config block at the top of this script)
+
+# Z-score each gene across all cells once, then average within panel x cluster.
+# Scoring on z-scores rather than raw VST keeps a highly expressed housekeeping-
+# like marker from dominating a panel mean.
+nf_z_all <- t(scale(t(nf_expr)))
+nf_z_all <- nf_z_all[rowSums(is.na(nf_z_all)) == 0, , drop=FALSE]
+
+nf_lin_rows <- list()
+for (lin in names(NF_LINEAGE_PANELS)) {
+  lin_ens <- sym_to_ens[NF_LINEAGE_PANELS[[lin]]]
+  lin_ens <- lin_ens[!is.na(lin_ens) & lin_ens %in% rownames(nf_z_all)]
+  cat(sprintf("  %-16s %d/%d panel genes found\n", lin, length(lin_ens),
+              length(NF_LINEAGE_PANELS[[lin]])))
+  if (length(lin_ens) < 3) {
+    cat("    *** WARNING: fewer than 3 markers - this lineage's score is",
+        "unreliable and should not be used to call a cluster ***\n")
+  }
+  if (length(lin_ens) == 0) next
+  for (cl in as.character(nf_cl_levels)) {
+    cl_cells <- names(nf_cluster_vec)[nf_cluster_vec == cl]
+    nf_lin_rows[[length(nf_lin_rows) + 1]] <- data.frame(
+      lineage = lin, cluster = cl, n_markers = length(lin_ens),
+      score = round(mean(nf_z_all[lin_ens, cl_cells, drop=FALSE]), 4),
+      stringsAsFactors = FALSE)
+  }
+}
+nf_lin_df <- do.call(rbind, nf_lin_rows)
+
+# Call each cluster by argmax, and report the margin over the runner-up. A thin
+# margin means the call is not well separated and should not be read as certain.
+nf_calls <- do.call(rbind, lapply(as.character(nf_cl_levels), function(cl) {
+  d <- nf_lin_df[nf_lin_df$cluster == cl, ]
+  d <- d[order(-d$score), ]
+  data.frame(cluster = cl,
+             n_cells = sum(nf_cluster_vec == cl),
+             call = d$lineage[1],
+             score = d$score[1],
+             runner_up = d$lineage[2],
+             runner_up_score = d$score[2],
+             margin = round(d$score[1] - d$score[2], 4),
+             stringsAsFactors = FALSE)
+}))
+cat("\n  Lineage calls (curated panels):\n")
+print(nf_calls, row.names = FALSE)
+if (any(nf_calls$margin < 0.25)) {
+  cat("  *** NOTE: margin < 0.25 for at least one cluster - that call is not",
+      "well separated from its runner-up. ***\n")
+}
+
+# Wide lineage x cluster matrix for the workbook and the figure
+nf_lin_wide <- reshape(nf_lin_df[, c("lineage","cluster","score")],
+                       idvar="lineage", timevar="cluster", direction="wide")
+colnames(nf_lin_wide) <- sub("^score\\.", "Cluster_", colnames(nf_lin_wide))
+
+wb_lin <- createWorkbook()
+addWorksheet(wb_lin, "Calls");   writeData(wb_lin, "Calls", nf_calls)
+setColWidths(wb_lin, "Calls", cols=1:7, widths=c(9,9,18,10,18,16,10))
+addWorksheet(wb_lin, "Scores");  writeData(wb_lin, "Scores", nf_lin_wide)
+setColWidths(wb_lin, "Scores", cols=1:ncol(nf_lin_wide), widths=18)
+addWorksheet(wb_lin, "Panels")
+writeData(wb_lin, "Panels", data.frame(
+  lineage = rep(names(NF_LINEAGE_PANELS), lengths(NF_LINEAGE_PANELS)),
+  gene    = unlist(NF_LINEAGE_PANELS, use.names=FALSE),
+  stringsAsFactors = FALSE))
+setColWidths(wb_lin, "Panels", cols=1:2, widths=c(18,14))
+addWorksheet(wb_lin, "Notes")
+writeData(wb_lin, "Notes", data.frame(Note=c(
+  "Score = mean per-gene z-score (across all cells in this analysis) of that lineage's panel, averaged over the cluster's cells.",
+  "Call = highest-scoring lineage. 'margin' is the gap to the runner-up; a small margin means the call is not well separated.",
+  "Panels are curated and broad. They cannot identify a lineage they do not contain.",
+  "Cross-check against cell_identity_NoMHCIIFilter_clusters.xlsx (CellMarker 2.0) and MCA_celltype_correlation_NoMHCIIFilter_clusters.xlsx, which use no curated panel.",
+  "Cluster IDs are re-derived every run and are NOT comparable across runs with a different cell or gene set."),
+  stringsAsFactors=FALSE))
+setColWidths(wb_lin, "Notes", cols=1, widths=120)
+saveWorkbook(wb_lin, file.path(nf_out_dir, "cluster_lineage_calls.xlsx"),
+             overwrite=TRUE)
+cat("  Saved: cluster_lineage_calls.xlsx\n")
+
+# -- Lineage score heatmap -----------------------------------------------------
+nf_lin_mat <- as.matrix(nf_lin_wide[, -1, drop=FALSE])
+rownames(nf_lin_mat) <- nf_lin_wide$lineage
+nf_lin_ht <- Heatmap(
+  nf_lin_mat,
+  name = "Mean z",
+  col  = colorRamp2(c(-max(abs(nf_lin_mat)), 0, max(abs(nf_lin_mat))),
+                    c("#3D0751", "#1A1A1A", "#F5E642")),
+  cluster_rows = FALSE, cluster_columns = FALSE,
+  row_names_gp = gpar(fontsize=10), column_names_gp = gpar(fontsize=10),
+  column_title = paste0("NoMHCIIFilter lineage scores - ", ncol(nf_lin_mat),
+                        " clusters x ", nrow(nf_lin_mat), " lineages"),
+  column_title_gp = gpar(fontsize=12, fontface="bold"),
+  cell_fun = function(j, i, x, y, w, h, fill) {
+    grid.text(sprintf("%.2f", nf_lin_mat[i, j]), x, y,
+              gp=gpar(fontsize=9, col="white"))
+  }
+)
+pdf(file.path(nf_out_dir, "lineage_score_heatmap.pdf"),
+    width=2 + 1.6*ncol(nf_lin_mat), height=1.5 + 0.55*nrow(nf_lin_mat))
+draw(nf_lin_ht, heatmap_legend_side="right")
+dev.off()
+cat("  Saved: lineage_score_heatmap.pdf\n")
+
+# -- 2. CellMarker 2.0 ---------------------------------------------------------
+# Marker sets are capped at TOP_EXCEL, matching the other folders. nf_markers is
+# uncapped (cluster 1 carries ~9.5k significant genes), and handing Fisher a set
+# that large washes out any enrichment signal.
+cat("\n  Running CellMarker cell identity scoring...\n")
+wb_cid <- createWorkbook()
+nf_cid_top5 <- do.call(rbind, lapply(names(nf_markers), function(cl) {
+  if (is.null(nf_markers[[cl]]) || nrow(nf_markers[[cl]]) == 0) return(NULL)
+  sc <- score_cluster(head(nf_markers[[cl]]$gene_symbol, TOP_EXCEL),
+                      cell_db, universe_size)
+  if (nrow(sc) == 0) return(NULL)
+  t5 <- head(sc, 5)
+  data.frame(cluster=cl, rank=seq_len(nrow(t5)), cell_type=t5$cell_type,
+             fisher_pval=signif(t5$fisher_pval, 3), stringsAsFactors=FALSE)
+}))
+addWorksheet(wb_cid, "Summary"); writeData(wb_cid, "Summary", nf_cid_top5)
+setColWidths(wb_cid, "Summary", cols=1:4, widths=c(10,6,35,12))
+for (cl in names(nf_markers)) {
+  if (is.null(nf_markers[[cl]]) || nrow(nf_markers[[cl]]) == 0) next
+  sc <- score_cluster(head(nf_markers[[cl]]$gene_symbol, TOP_EXCEL),
+                      cell_db, universe_size)
+  sn <- paste0("Cluster_", cl)
+  addWorksheet(wb_cid, sn); writeData(wb_cid, sn, sc)
+  setColWidths(wb_cid, sn, cols=1:10, widths=c(5,25,10,14,12,10,12,12,12,40))
+}
+saveWorkbook(wb_cid, file.path(nf_out_dir,
+             "cell_identity_NoMHCIIFilter_clusters.xlsx"), overwrite=TRUE)
+cat("  Saved: cell_identity_NoMHCIIFilter_clusters.xlsx\n")
+if (!is.null(nf_cid_top5)) {
+  cat("  Top CellMarker hit per cluster:\n")
+  print(nf_cid_top5[nf_cid_top5$rank == 1, c("cluster","cell_type","fisher_pval")],
+        row.names=FALSE)
+}
+
+# -- 3. Mouse Cell Atlas -------------------------------------------------------
+cat("\n  Running Mouse Cell Atlas correlation...\n")
+run_mca_correlation(
+  expr_mat             = nf_expr,
+  cluster_vec_input    = nf_cluster_vec,
+  cluster_levels_input = nf_cl_levels,
+  to_sym_fn            = to_sym,
+  out_path             = file.path(nf_out_dir,
+                          "MCA_celltype_correlation_NoMHCIIFilter_clusters.xlsx"),
+  label                = "NoMHCIIFilter"
+)
+
+
+} # end NF_RUN_CLUSTER_OUTPUTS
+
+} # end NoMHCIIFilter
+
+} # end RUN_NOMHCIIFILTER
 
 cat("\n==============================================================\n")
 cat("All outputs complete. Output structure:\n")
-for (st in strains) {
-  cat(" results/05_dge/", st, "_plots/  (file count varies with # of contrasts)\n", sep="")
+if (RUN_PER_STRAIN_PLOTS) {
+  for (st in strains) {
+    cat(" results/05_dge/", st, "_plots/  (file count varies with # of contrasts)\n", sep="")
+  }
+} else {
+  cat(" (per-plate <STRAIN>_plots/ skipped - RUN_PER_STRAIN_PLOTS is FALSE)\n")
 }
-cat(" results/05_dge/combined_plots/\n")
-cat("   - umap_all", n_comb_cells, "_by_cluster.pdf\n", sep="")
-cat("   - umap_all", n_comb_cells, "_by_strain_population.pdf\n", sep="")
-cat("   - barplots_cluster_composition.pdf  (all 4 charts, 2x2)\n")
-cat("   - cluster_marker_genes.xlsx\n")
-cat("   - heatmap_cluster_markers.pdf\n")
+if (RUN_COMBINED_PLOTS) {
+  cat(" results/05_dge/combined_plots/\n")
+  cat("   - umap_all", n_comb_cells, "_by_cluster.pdf\n", sep="")
+  cat("   - umap_all", n_comb_cells, "_by_strain_population.pdf\n", sep="")
+  cat("   - barplots_cluster_composition.pdf  (all 4 charts, 2x2)\n")
+  cat("   - cluster_marker_genes.xlsx\n")
+  cat("   - heatmap_cluster_markers.pdf\n")
+} else {
+  cat(" (combined_plots/ skipped - RUN_COMBINED_PLOTS is FALSE)\n")
+}
+cat(" results/05_dge/NoMHCIIFilter/\n")
+cat("   - umap_all*_by_cell_type.pdf\n")
+cat("   - violin_GOI_by_cell_type.pdf  (",
+    paste(NF_GENES_OF_INTEREST, collapse=", "), " in ",
+    paste(NF_FOCUS_TYPES, collapse=" / "), ")\n", sep="")
+cat("   - GOI_expression_by_cell.xlsx\n")
+cat("   - expression_all_genes_by_cell_VST.csv\n")
+cat("   - expression_all_genes_by_cell_counts.csv\n")
+if (NF_RUN_CLUSTER_OUTPUTS) cat("   - (legacy cluster outputs also written)\n")
 cat("==============================================================\n")
