@@ -680,6 +680,41 @@ Method, in order:
 > VAF/VRC orientation bug above. The script now hard-errors if a panel named in
 > `NF_FOCUS_TYPES` resolves to fewer than 3 markers.
 
+##### The marker panels
+
+59 markers across 6 cell types. These are the literal lists in
+`NF_LINEAGE_PANELS` at the top of `scripts/per_strain_plots.R` — edit them there.
+"Found in last run" is how many resolved to a gene present in the data; the
+script prints this every run and hard-errors if a panel named in
+`NF_FOCUS_TYPES` falls below 3.
+
+| Cell type | Markers | Found in last run | Genes |
+|---|---|---|---|
+| `Hematopoietic` | 10 | 10/10 | `Ptprc`, `Coro1a`, `Laptm5`, `Lcp1`, `Fcer1g`, `Ctss`, `Cd52`, `Cd74`, `Arhgdib`, `Cd48` |
+| `Endothelial` | 10 | 10/10 | `Pecam1`, `Cdh5`, `Kdr`, `Tie1`, `Vwf`, `Eng`, `Esam`, `Plvap`, `Cldn5`, `Egfl7` |
+| `Fibroblast` | 11 | 11/11 | `Col1a1`, `Col1a2`, `Col3a1`, `Col6a1`, `Dcn`, `Lum`, `Pdgfra`, `Postn`, `Fbln1`, `Mgp`, `Serpinf1` |
+| `Pericyte_SMC` | 7 | 7/7 | `Acta2`, `Pdgfrb`, `Rgs5`, `Myh11`, `Des`, `Notch3`, `Cspg4` |
+| `Endocrine_islet` | 12 | 12/12 | `Chga`, `Chgb`, `Scg2`, `Scg5`, `Ins1`, `Ins2`, `Gcg`, `Sst`, `Ppy`, `Pcsk1n`, `Resp18`, `Pcsk2` |
+| `Acinar_ductal` | 9 | 8/9 | `Cela1`, `Ctrb1`, `Prss2`, `Cpa1`, `Amy2a5`, `Krt19`, `Krt18`, `Sox9`, `Spp1` |
+
+`Acinar_ductal` sits at 8/9 because **`Cpa1` has zero counts across all 454
+cells**, so z-scoring produces `NaN` and it is dropped. The gene is present in
+the count matrix and the annotation — it is simply not expressed in this sort,
+which is unsurprising for islet preparations with little exocrine carryover.
+
+That is a harmless shortfall, but it is exactly the kind of thing to check
+before trusting a call: a panel silently shrinking is how the `nf_expr` bug
+above went unnoticed. Several acinar markers are near-absent here — `Amy2a5`
+in 2 of 454 cells, `Prss2` in 3, `Ctrb1` in 10 — so the `Acinar_ductal` label
+rests largely on `Krt18` (152 cells) and `Spp1` (105), both of which are broader
+than the exocrine compartment. **Treat the 22 acinar/ductal calls with more
+caution than the endothelial or hematopoietic ones.**
+
+Panels are deliberately **non-overlapping** — verified: all 59 markers are
+unique, no gene appears in two panels, because a shared marker would make the
+argmax label meaningless. They are also
+deliberately **broad** — these identify lineages, not subtypes.
+
 **Marker provenance — read before publishing.** These panels are conventional
 textbook lineage markers, assembled by hand. They are **not** taken from a
 database or a citable source. Some overlap the repo's pre-existing fallback
