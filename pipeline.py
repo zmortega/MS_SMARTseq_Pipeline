@@ -150,8 +150,14 @@ def step_trim(cells, cfg, log, resume):
         r2u = cell_trim / f"{cell}_R2_unpaired.fastq.gz"
         trim_log = cell_trim / f"{cell}_trim.log"
 
+        # -Xmx8g: the bioconda trimmomatic wrapper hardcodes a 1 GB JVM heap,
+        # which OOMs ("Trim Stats Collector Exception -> OutOfMemoryError:
+        # Java heap space") on larger inputs. It surfaced on the NODPDL1_2
+        # plate, whose per-well FASTQs are lane-merged and therefore roughly
+        # double the usual size -- a 147 MB R1 was enough to blow the default.
+        # The wrapper passes any -Xm* argument straight through to java.
         cmd = (
-            f"trimmomatic PE -threads 4 -phred33 "
+            f"trimmomatic -Xmx8g PE -threads 4 -phred33 "
             f"{r1} {r2} "
             f"{r1p} {r1u} {r2p} {r2u} "
             f"ILLUMINACLIP:{adapter_file}:2:30:10:2:keepBothReads "

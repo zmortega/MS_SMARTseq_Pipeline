@@ -174,6 +174,148 @@ NF_LINEAGE_PANELS <- list(
 # and MCA download dominate this section's runtime.
 NF_RUN_CLUSTER_OUTPUTS <- FALSE
 
+# -- VAF/VRC correlation: when is "best match" actually a match? ---------------
+# The Summary sheet used to report best_match with no margin and no floor, so a
+# statistical tie and a genuine match were formatted identically. Measured on
+# the current data, cluster 4 was called VRC over CD45pos by 0.0139 in Pearson r
+# and cluster 2 was called CD45pos on a winning correlation of 0.319 -- i.e. it
+# resembles none of the three references. Both read as confident calls.
+#
+# A call is now only reported when it clears BOTH tests. It is otherwise blanked
+# to "unresolved"; the per-cluster sheets still carry every raw correlation, so
+# nothing is hidden, it just stops asserting more than the numbers support.
+# -- Per-plate batch correction ------------------------------------------------
+# WHY: size factors are estimated from each plate's OWN reference wells, so every
+# plate is scaled to a different baseline and the normalisation itself imposes a
+# plate-specific offset on every gene. Measured on the CD45+ reference cells --
+# nominally the same population on 6 plates, so any separation is technical --
+# plate explains 13.3% of variance in raw log-CPM but 23.3% in the per-plate VST
+# that clustering consumes, rising from 1.3% to 20.5% on PC1 alone. The
+# normalisation amplifies it. The visible symptom was NODPDL1_2 landing 47/47 in
+# a single cluster, both subgates together.
+#
+# WHY THE LABELS MUST BE HARMONISED FIRST: removeBatchEffect needs plate and
+# condition to be separable. 6 of 9 raw conditions exist on exactly one plate
+# (all three of NODPDL1_2's, both of NODCD31's), which makes ~plate + condition
+# rank deficient -- 13 of 15 columns. Collapsing the single-plate labels into the
+# nearest label that spans several plates restores full rank (11 of 11).
+#
+# WHAT THIS DOES NOT COST: the batch offset is one scalar per plate per gene,
+# applied to every cell on that plate. Differences WITHIN a plate -- CD31+ vs
+# CD31-, MHCIIhi vs MHCIIlo, VAF vs VRC -- are shifted identically and therefore
+# fully preserved. Only how a plate sits relative to other plates is removed.
+if (!requireNamespace("matrixStats", quietly=TRUE))
+  install.packages("matrixStats", repos="https://cloud.r-project.org", quiet=TRUE)
+
+BATCH_CORRECT_BY_PLATE <- TRUE
+
+# Collapse only those condition labels that occur on a single plate. MHCIIhi and
+# MHCIIlo span 4 plates and are deliberately kept. Clarke's VAF/VRC map onto the
+# CD45- MHCII+ level; their mutual difference survives because both sit in the
+# same batch.
+harmonise_condition <- function(x) {
+  x <- as.character(x)
+  x[x %in% c("CD45pos_MHCIIpos_PDL1pos", "CD45pos")]        <- "CD45pos_MHCIIpos"
+  x[x %in% c("CD45neg_MHCIIpos_PDL1pos",
+             "CD45neg_MHCIIpos_CD31neg",
+             "CD45neg_MHCIIpos_CD31pos",
+             "VAF", "VRC")]                                  <- "CD45neg_MHCIIpos"
+  x
+}
+
+# Refuses rather than silently returning a half-corrected matrix.
+apply_plate_correction <- function(mat, plate, condition, label) {
+  if (!BATCH_CORRECT_BY_PLATE) {
+    cat("  [", label, "] plate correction disabled\n", sep=""); return(mat)
+  }
+  plate <- factor(plate); harm <- factor(harmonise_condition(condition))
+  if (nlevels(plate) < 2) {
+    cat("  [", label, "] only one plate - nothing to correct\n", sep=""); return(mat)
+  }
+  if (nlevels(harm) < 2) {
+    des <- matrix(1, ncol(mat), 1)
+  } else {
+    des <- model.matrix(~ harm)
+  }
+  full <- cbind(model.matrix(~ plate), des[, -1, drop=FALSE])
+  if (qr(full)$rank < ncol(full)) {
+    cat("  [", label, "] *** design is rank deficient (", qr(full)$rank, " of ",
+        ncol(full), ") - SKIPPING correction rather than removing biology ***\n", sep="")
+    return(mat)
+  }
+  # Constant genes have no batch effect to estimate and make the per-gene fit
+  # degenerate, which comes back as NaN and then kills prcomp with an opaque
+  # "error code 1 from Lapack routine dgesdd". They exist here because the
+  # violin-gene exemption deliberately forces zero-count genes through the
+  # per-plate filter (e.g. Cpa1 is 0 in every cell). Hold them out of the
+  # correction and re-attach them unchanged -- dropping them would silently
+  # shrink the gene set that downstream code expects.
+  gv    <- matrixStats::rowVars(mat)
+  const <- !is.finite(gv) | gv == 0
+  if (any(const))
+    cat("  [", label, "] holding out ", sum(const),
+        " zero-variance gene(s) from correction\n", sep="")
+
+  out <- mat
+  out[!const, ] <- limma::removeBatchEffect(mat[!const, , drop=FALSE],
+                                            batch=plate, design=des)
+
+  # Anything still non-finite is a fit that failed for a reason not covered
+  # above; report it loudly rather than letting it reach the SVD.
+  bad <- !is.finite(out)
+  if (any(bad)) {
+    nb <- sum(rowSums(bad) > 0)
+    cat("  [", label, "] *** ", sum(bad), " non-finite value(s) across ", nb,
+        " gene(s) after correction; reverting those genes to uncorrected ***\n", sep="")
+    rb <- which(rowSums(bad) > 0)
+    out[rb, ] <- mat[rb, ]
+  }
+  stopifnot(all(is.finite(out)), identical(dim(out), dim(mat)))
+  cat(sprintf("  [%s] value range before: [%.2f, %.2f]  after: [%.2f, %.2f]\n",
+              label, min(mat), max(mat), min(out), max(out)))
+  ext <- sum(abs(out) > 1e4)
+  if (ext > 0)
+    cat("  [", label, "] *** ", ext, " value(s) exceed 1e4 after correction -- ",
+        "near-singular per-gene fits; PCA may not converge ***\n", sep="")
+
+  cat("  [", label, "] corrected across ", nlevels(plate), " plates, preserving ",
+      nlevels(harm), " harmonised condition(s)\n", sep="")
+  cat("      plates: ", paste(levels(plate), collapse=", "), "\n", sep="")
+  out
+}
+
+MIN_CORR_R      <- 0.50   # the winning Pearson r must reach this
+MIN_CORR_MARGIN <- 0.05   # ...and beat the runner-up by at least this
+
+# Returns a one-row data.frame describing the best reference match for a cluster.
+# `df` must have columns reference_population / pearson_r / spearman_rho.
+summarise_best_match <- function(cl_label, df) {
+  if (nrow(df) == 0) return(NULL)
+  o    <- df[order(-df$pearson_r), ]
+  top  <- o[1, ]
+  runner <- if (nrow(o) > 1) o[2, ] else NULL
+  margin <- if (is.null(runner)) NA_real_ else round(top$pearson_r - runner$pearson_r, 4)
+  ok     <- top$pearson_r >= MIN_CORR_R &&
+            (is.na(margin) || margin >= MIN_CORR_MARGIN)
+  reason <- if (ok) "" else paste(c(
+    if (top$pearson_r < MIN_CORR_R)
+      sprintf("best r %.3f < %.2f", top$pearson_r, MIN_CORR_R),
+    if (!is.na(margin) && margin < MIN_CORR_MARGIN)
+      sprintf("margin %.3f < %.2f vs %s", margin, MIN_CORR_MARGIN,
+              runner$reference_population)), collapse="; ")
+  data.frame(
+    cluster            = cl_label,
+    best_match         = if (ok) top$reference_population else "unresolved",
+    confident          = ok,
+    best_pearson_r     = top$pearson_r,
+    best_spearman_rho  = top$spearman_rho,
+    runner_up          = if (is.null(runner)) NA_character_ else runner$reference_population,
+    runner_up_r        = if (is.null(runner)) NA_real_ else runner$pearson_r,
+    margin             = margin,
+    why_unresolved     = reason,
+    stringsAsFactors   = FALSE)
+}
+
 # -- Which analyses to run -----------------------------------------------------
 # The per-plate folders and combined_plots are TURNED OFF, not deleted: flip a
 # flag back to TRUE to restore that output exactly as before. Turning them off
@@ -199,6 +341,10 @@ RUN_PER_STRAIN_PLOTS <- FALSE   # results/05_dge/<STRAIN>_plots/
 RUN_COMBINED_PLOTS   <- FALSE   # results/05_dge/combined_plots/
 RUN_VAF_MERGED       <- TRUE    # results/05_dge/CombinedwithVAFPaperPlots/
 RUN_NOMHCIIFILTER    <- TRUE    # results/05_dge/NoMHCIIFilter/
+RUN_DONSPAPER        <- TRUE    # results/05_dge/DonsPaper/
+
+# Genes given a per-cluster violin panel in the DonsPaper analysis.
+DONS_GENES <- c("Ptprc", "Col1a1", "Col1a2", "Pecam1")
 
 # -- Self-copy into scripts/ for version control -------------------------------
 # (skipped when already running from scripts/per_strain_plots.R, since
@@ -510,7 +656,10 @@ REF_CONDITION <- DEFAULT_REF_CONDITION   # default; per-plate overrides below
 # Plates whose baseline is not CD45pos_MHCIIpos. Keyed by strain (plate), not
 # strain_group. Adding another such plate is a one-line entry here.
 REF_CONDITION_OVERRIDES <- c(
-  NODCD31 = "CD45neg_MHCIIpos_CD31neg"
+  NODCD31   = "CD45neg_MHCIIpos_CD31neg",
+  # NODPDL1_2 is normalized on its triple-positive block (A1-A12,
+  # CD45+ MHCII+ PDL1+), which is the plate's only CD45+ population.
+  NODPDL1_2 = "CD45pos_MHCIIpos_PDL1pos"
 )
 
 ref_condition_for <- function(strain) {
@@ -532,13 +681,25 @@ cond_colors <- c(
   "CD45- MHCIIlo"         = "#4DAC26",
   "CD45- MHCIIpos"        = "#B15928",
   "CD45- MHCIIpos CD31-"  = "#7570B3",
-  "CD45- MHCIIpos CD31+"  = "#E6AB02"
+  "CD45- MHCIIpos CD31+"  = "#E6AB02",
+  # NODPDL1_2. Its MHCII-negative block is the first deliberately MHCII- sort in
+  # this pipeline, so it gets a visually distinct colour rather than a shade of
+  # the MHCII+ ones.
+  "CD45+ MHCIIpos PDL1+"  = "#1B7837",
+  "CD45- MHCIIpos PDL1+"  = "#762A83",
+  "CD45- MHCIIneg PDL1+"  = "#999999"
 )
 
 # NOTE: longer condition strings must be substituted before their prefixes,
 # otherwise "CD45neg_MHCIIpos" would eat the front of
 # "CD45neg_MHCIIpos_CD31neg" and leave a mangled "CD45- MHCIIpos_CD31neg".
 clean_label <- function(x) {
+  # ORDER MATTERS: longer condition names must be rewritten before the shorter
+  # ones they contain, or e.g. CD45pos_MHCIIpos_PDL1pos gets half-substituted by
+  # the CD45pos_MHCIIpos rule and comes out as "CD45+ MHCIIpos_PDL1pos".
+  x <- gsub("CD45pos_MHCIIpos_PDL1pos", "CD45+ MHCIIpos PDL1+", x)
+  x <- gsub("CD45neg_MHCIIpos_PDL1pos", "CD45- MHCIIpos PDL1+", x)
+  x <- gsub("CD45neg_MHCIIneg_PDL1pos", "CD45- MHCIIneg PDL1+", x)
   x <- gsub("CD45neg_MHCIIpos_CD31neg", "CD45- MHCIIpos CD31-", x)
   x <- gsub("CD45neg_MHCIIpos_CD31pos", "CD45- MHCIIpos CD31+", x)
   x <- gsub("CD45pos_MHCIIpos", "CD45+ MHCIIpos", x)
@@ -607,7 +768,43 @@ run_umap <- function(expr_subset, seed=UMAP_SEED,
                      min_dist=UMAP_MIN_DIST,
                      var_threshold=VAR_THRESHOLD) {
   # expr_subset: genes x cells matrix (already VST, HVG-filtered)
-  pca_res   <- prcomp(t(expr_subset), center=TRUE, scale.=FALSE)
+  # Constant genes contribute nothing and can stall the LAPACK SVD.
+  gv <- apply(expr_subset, 1, var)
+  if (any(!is.finite(gv) | gv == 0)) {
+    n0 <- sum(!is.finite(gv) | gv == 0)
+    cat("    dropping", n0, "zero-variance gene(s) before PCA\n")
+    expr_subset <- expr_subset[is.finite(gv) & gv > 0, , drop=FALSE]
+  }
+  # prcomp uses LAPACK dgesdd, which can fail to converge ("error code 1") on
+  # awkwardly scaled input even when every value is finite. Retry once with the
+  # slower but more robust dgesvd path before giving up, so a convergence
+  # quirk cannot take down a run that has already done all its heavy lifting.
+  pca_res <- tryCatch(
+    prcomp(t(expr_subset), center=TRUE, scale.=FALSE),
+    error = function(e) {
+      # prcomp and La.svd both route through LAPACK dgesdd, which has been seen
+      # to fail with "error code 1" on this data even though every value is
+      # finite and the range is unremarkable ([-11, 26]) -- and while succeeding
+      # on random matrices of identical dimensions. Rather than keep guessing at
+      # the cause, fall back to an eigendecomposition of the Gram matrix, which
+      # is mathematically the same PCA but goes through dsyevr instead of dgesdd.
+      #
+      # For x (cells x genes, centred): x = U D V', so x x' = U D^2 U'.
+      # Scores are U D; sdev is D / sqrt(n-1).
+      cat("    prcomp failed (", conditionMessage(e),
+          ") - falling back to eigen-based PCA\n", sep="")
+      dump <- file.path(tempdir(), "failed_pca_matrix.rds")
+      saveRDS(expr_subset, dump)
+      cat("    offending matrix saved to ", dump, "\n", sep="")
+      x   <- scale(t(expr_subset), center=TRUE, scale=FALSE)
+      ev  <- eigen(tcrossprod(x), symmetric=TRUE)
+      k   <- sum(ev$values > max(ev$values) * 1e-10)
+      d   <- sqrt(pmax(ev$values[1:k], 0))
+      sc  <- ev$vectors[, 1:k, drop=FALSE] %*% diag(d, k, k)
+      rownames(sc) <- rownames(x)
+      colnames(sc) <- paste0("PC", seq_len(k))
+      list(sdev = d / sqrt(max(1, nrow(x) - 1)), x = sc)
+    })
   var_exp   <- pca_res$sdev^2 / sum(pca_res$sdev^2)
   cum_var   <- cumsum(var_exp)
   n_pcs     <- max(2, which(cum_var >= var_threshold)[1])
@@ -2135,24 +2332,15 @@ if (RUN_COMBINED_PLOTS) {
   wb_vaf <- createWorkbook()
 
   # Summary sheet
-  summary_vaf <- do.call(rbind, lapply(names(corr_results), function(cl) {
-    df <- corr_results[[cl]]
-    if (nrow(df) == 0) return(NULL)
-    best_row <- df[which.max(df$pearson_r), ]
-    data.frame(
-      cluster              = cl,
-      best_match           = best_row$reference_population,
-      best_pearson_r       = best_row$pearson_r,
-      best_spearman_rho    = best_row$spearman_rho,
-      stringsAsFactors     = FALSE
-    )
-  }))
+  summary_vaf <- do.call(rbind, lapply(names(corr_results), function(cl)
+    summarise_best_match(cl, corr_results[[cl]])))
   addWorksheet(wb_vaf, "Summary")
   writeData(wb_vaf, "Summary", summary_vaf)
   addStyle(wb_vaf, "Summary",
     style=createStyle(textDecoration="bold", fgFill="#E2EFDA"),
-    rows=1, cols=1:4, gridExpand=TRUE)
-  setColWidths(wb_vaf, "Summary", cols=1:4, widths=c(10,18,16,16))
+    rows=1, cols=1:9, gridExpand=TRUE)
+  setColWidths(wb_vaf, "Summary", cols=1:9,
+               widths=c(10,16,11,15,17,16,12,10,42))
 
   # One sheet per cluster
   for (cl_label in names(corr_results)) {
@@ -2670,24 +2858,20 @@ if (!RUN_VAF_MERGED) {
   }
   suppressPackageStartupMessages(library(limma))
 
-  # Batch vector: "yours" for your own strains, "clarke" for Clarke2025
-  all_cells_merged <- colnames(merged_expr_raw)
-  batch_vec        <- ifelse(all_cells_merged %in% colnames(combined_expr),
-                              "yours", "clarke")
-  cat("  Batch composition — yours:", sum(batch_vec=="yours"),
-      "| clarke:", sum(batch_vec=="clarke"), "\n")
-
-  # Preserve condition structure as a covariate so biological signal
-  # is not removed along with the batch effect
+  # Batch is now the PLATE, not the dataset. Clarke2025 is itself a plate-level
+  # batch, so this subsumes the old yours-vs-clarke correction rather than
+  # replacing it: correcting per plate necessarily removes the between-dataset
+  # offset too.
+  all_cells_merged    <- colnames(merged_expr_raw)
   meta_merged_ordered <- meta_merged[all_cells_merged, ]
-  condition_covar     <- model.matrix(~ condition,
-                           data=data.frame(
-                             condition=factor(meta_merged_ordered$condition)))
+  cat("  Batch composition by plate:\n")
+  print(table(meta_merged_ordered$strain))
 
-  merged_expr <- removeBatchEffect(merged_expr_raw,
-                                    batch     = batch_vec,
-                                    design    = condition_covar)
-  cat("  Batch correction applied (limma::removeBatchEffect)\n")
+  merged_expr <- apply_plate_correction(
+    merged_expr_raw,
+    plate     = meta_merged_ordered$strain,
+    condition = meta_merged_ordered$condition,
+    label     = "merged")
   cat("Merged matrix (post-correction):", nrow(merged_expr), "genes x",
       ncol(merged_expr), "cells\n")
 
@@ -3189,10 +3373,7 @@ if (!RUN_VAF_MERGED) {
     your_idx_m        <- which(your_sym_merged %in% common_m_vaf)
     your_syms_m       <- your_sym_merged[your_idx_m]
     wb_vaf_m          <- createWorkbook()
-    summary_vaf_m     <- data.frame(cluster=character(), best_match=character(),
-                                     best_pearson_r=numeric(),
-                                     best_spearman_rho=numeric(),
-                                     stringsAsFactors=FALSE)
+    summary_vaf_m     <- NULL
     for (cl_label in as.character(cluster_levels_m)) {
       cl_cells_m <- names(cluster_vec_m)[cluster_vec_m == cl_label]
       your_mean_m <- rowMeans(merged_expr[your_idx_m, cl_cells_m, drop=FALSE])
@@ -3210,11 +3391,8 @@ if (!RUN_VAF_MERGED) {
           spearman_rho=round(cor(your_mean_m[common], ref_v[common], method="spearman"),4),
           n_genes=length(common), stringsAsFactors=FALSE))
       }
-      best_m <- cl_corrs_m[which.max(cl_corrs_m$pearson_r), ]
-      summary_vaf_m <- rbind(summary_vaf_m, data.frame(
-        cluster=cl_label, best_match=best_m$reference_population,
-        best_pearson_r=best_m$pearson_r,
-        best_spearman_rho=best_m$spearman_rho, stringsAsFactors=FALSE))
+      summary_vaf_m <- rbind(summary_vaf_m,
+                             summarise_best_match(cl_label, cl_corrs_m))
       sn_m <- paste0("Cluster_", cl_label)
       addWorksheet(wb_vaf_m, sn_m); writeData(wb_vaf_m, sn_m, cl_corrs_m)
       addStyle(wb_vaf_m, sn_m,
@@ -3228,6 +3406,33 @@ if (!RUN_VAF_MERGED) {
       setColWidths(wb_vaf_m, sn_m, cols=1:4, widths=c(22,12,14,10))
     }
     addWorksheet(wb_vaf_m, "Summary"); writeData(wb_vaf_m, "Summary", summary_vaf_m)
+    addStyle(wb_vaf_m, "Summary",
+             style=createStyle(textDecoration="bold", fgFill="#E2EFDA"),
+             rows=1, cols=1:9, gridExpand=TRUE)
+    setColWidths(wb_vaf_m, "Summary", cols=1:9,
+                 widths=c(10,16,11,15,17,16,12,10,42))
+    # Grey out any cluster whose call did not clear both tests.
+    if (!is.null(summary_vaf_m) && any(!summary_vaf_m$confident)) {
+      addStyle(wb_vaf_m, "Summary", style=createStyle(fontColour="#9C0006",
+               fgFill="#FFC7CE"),
+               rows=which(!summary_vaf_m$confident) + 1, cols=1:9,
+               gridExpand=TRUE)
+    }
+    addWorksheet(wb_vaf_m, "Notes")
+    writeData(wb_vaf_m, "Notes", data.frame(Note=c(
+      paste0("best_match is reported only when the winning Pearson r >= ", MIN_CORR_R,
+             " AND it beats the runner-up by >= ", MIN_CORR_MARGIN,
+             ". Otherwise best_match is 'unresolved' and why_unresolved says which test failed."),
+      "The per-cluster sheets carry every raw correlation regardless; nothing is hidden by this rule.",
+      paste0("MAJOR CAVEAT: GSE292898 ships no cell-type labels, only the CD45-/HLA-DR+ sort gate. ",
+             "VAF and VRC here are RECONSTRUCTED by k-means (k=2) on the Clarke CD45- cells."),
+      paste0("That reconstruction was audited on 2026-09-01: of the cells it calls VAF, the large ",
+             "majority score as islet-endocrine rather than fibroblast (Col1a1 positive in ~4% of ",
+             "them against Ins2 in ~73%). Treat the VAF reference as a mostly-endocrine centroid, ",
+             "not a fibroblast profile, and do not read a VAF match as evidence of fibroblast identity."),
+      "Cluster IDs are re-derived every run and are NOT comparable across runs with a different cell or gene set."),
+      stringsAsFactors=FALSE))
+    setColWidths(wb_vaf_m, "Notes", cols=1, widths=120)
 
     # -- CD45- MHCII+ cluster distribution --------------------------------------
     # Where does each CD45- MHCII+ cell land, cluster-wise, per strain?
@@ -3623,6 +3828,19 @@ rownames(nf_meta)    <- nf_meta$cell_id
 nf_meta <- nf_meta[colnames(nf_expr), , drop=FALSE]
 stopifnot(identical(rownames(nf_meta), colnames(nf_expr)))
 cat("Total cells in NoMHCIIFilter matrix:", ncol(nf_expr), "\n")
+
+# Same per-plate offset problem applies here. Corrected for the UMAP/HVG space
+# only. NOTE: per-cell typing is deliberately NOT affected -- it scores raw-count
+# log-CPM, which never passes through per-plate size factors, so the cell-type
+# calls are independent of this correction either way.
+if (!requireNamespace("limma", quietly=TRUE)) {
+  BiocManager::install("limma", ask=FALSE, update=FALSE, quiet=TRUE)
+}
+suppressPackageStartupMessages(library(limma))
+nf_expr <- apply_plate_correction(nf_expr,
+                                  plate     = nf_meta[colnames(nf_expr), "strain"],
+                                  condition = nf_meta[colnames(nf_expr), "condition"],
+                                  label     = "NoMHCIIFilter")
 
 # HVG -> PCA -> UMAP (layout only)
 nf_vars <- apply(nf_expr, 1, var)
@@ -4390,6 +4608,277 @@ run_mca_correlation(
 
 } # end RUN_NOMHCIIFILTER
 
+
+# ==============================================================================
+# DonsPaper: the Clarke/Don GSE292898 mouse data on its own
+# ==============================================================================
+# Standalone by design. Reads the published count matrix directly and shares
+# nothing with the merged analysis: no MHCII filter, no cross-plate gene
+# intersection, no VAF/VRC reconstruction, no batch correction (it is a single
+# dataset). The point is to see what is actually in that dataset before any of
+# this pipeline's assumptions are layered onto it.
+#
+# It also works in Clarke's own gene-symbol space rather than mapping through
+# your Ensembl IDs. Mapping first would silently drop any gene absent from your
+# plates -- the same intersection leakage that broke the VAF marker panels.
+if (!RUN_DONSPAPER) {
+  cat("\nSkipping DonsPaper - RUN_DONSPAPER is FALSE\n")
+} else if (!file.exists(vaf_counts_f2)) {
+  cat("\nSkipping DonsPaper - Clarke count matrix not found at", vaf_counts_f2, "\n")
+} else {
+
+cat("\n==============================================================\n")
+cat("Building DonsPaper analysis (Clarke/Don GSE292898, standalone)...\n")
+cat("==============================================================\n")
+
+dons_dir <- file.path(dge_dir, "DonsPaper")
+dir.create(dons_dir, recursive=TRUE, showWarnings=FALSE)
+
+dons_raw <- read.csv(gzfile(vaf_counts_f2), row.names=1, check.names=FALSE)
+dons_cnt <- as.matrix(dons_raw[, !colnames(dons_raw) %in% c("gene_id","gene_name")])
+rownames(dons_cnt) <- dons_raw[["gene_name"]]
+storage.mode(dons_cnt) <- "numeric"
+dons_cnt <- dons_cnt[!is.na(rownames(dons_cnt)) & rownames(dons_cnt) != "", , drop=FALSE]
+dons_cnt <- dons_cnt[, colSums(dons_cnt) > 0, drop=FALSE]
+cat("Clarke matrix:", nrow(dons_cnt), "genes x", ncol(dons_cnt), "cells\n")
+
+# Sort gate is stated in the column names (e.g. A01cd45POSspMMasRS), so it is
+# read rather than inferred. The pipeline elsewhere guesses this from well
+# position; that guess happens to be right for this dataset, but reading the
+# label cannot silently drift if the layout ever changes.
+dons_gate <- ifelse(grepl("cd45POS", colnames(dons_cnt), ignore.case=TRUE),
+                    "CD45pos", "CD45neg")
+names(dons_gate) <- colnames(dons_cnt)
+cat("Sort gate (from the column names):\n"); print(table(dons_gate))
+
+# Same depth floor as NoMHCIIFilter, for the same reason: shallow cells cluster
+# by library size rather than biology.
+dons_ng   <- colSums(dons_cnt > 0)
+dons_keep <- names(dons_ng)[dons_ng >= NOFILT_MIN_GENES]
+cat("Depth floor: >=", NOFILT_MIN_GENES, "genes detected -> keeping",
+    length(dons_keep), "of", ncol(dons_cnt), "cells\n")
+print(table(dons_gate[dons_keep]))
+dons_cnt <- dons_cnt[, dons_keep, drop=FALSE]
+dons_gate <- dons_gate[dons_keep]
+if (ncol(dons_cnt) < 10) stop("DonsPaper: too few cells survive the depth floor.")
+
+# Low-count gene filter, exempting the genes we are going to plot. A gene with
+# zero counts is a measurement, and dropping it here would make it unplottable
+# rather than plottable as zeros.
+dons_keep_g <- rowSums(dons_cnt) >= 10 | rownames(dons_cnt) %in% DONS_GENES
+cat("Genes passing filter:", sum(dons_keep_g), "of", nrow(dons_cnt), "\n")
+dons_cnt <- dons_cnt[dons_keep_g, , drop=FALSE]
+
+# VST. blind=TRUE so the transformation cannot be informed by the sort gate --
+# the clustering below is meant to be unsupervised.
+dons_dds <- DESeqDataSetFromMatrix(round(dons_cnt),
+                                   data.frame(gate=factor(dons_gate),
+                                              row.names=colnames(dons_cnt)),
+                                   design = ~ 1)
+dons_dds <- estimateSizeFactors(dons_dds, type="poscounts")
+dons_expr <- assay(varianceStabilizingTransformation(dons_dds, blind=TRUE))
+cat("VST complete:", nrow(dons_expr), "genes x", ncol(dons_expr), "cells\n")
+
+# HVG -> PCA -> UMAP for layout; separate all-gene PCA -> Leiden for clusters.
+# Same construction as every other embedding in this script.
+dons_var <- apply(dons_expr, 1, var)
+dons_hvg <- names(sort(dons_var, decreasing=TRUE))[1:min(N_HVG, sum(dons_var > 0))]
+cat("HVGs selected:", length(dons_hvg), "\n")
+cat("Running PCA + UMAP...\n")
+dons_umap <- run_umap(dons_expr[dons_hvg, , drop=FALSE])
+dons_df   <- data.frame(dons_umap, cell_id=rownames(dons_umap),
+                        gate=dons_gate[rownames(dons_umap)],
+                        stringsAsFactors=FALSE)
+
+cat("Running all-gene PCA for clustering...\n")
+dons_nz   <- dons_expr[apply(dons_expr, 1, var) > 0, , drop=FALSE]
+dons_pca  <- prcomp(t(dons_nz), center=TRUE, scale.=FALSE)
+dons_cum  <- cumsum(dons_pca$sdev^2 / sum(dons_pca$sdev^2))
+dons_npc  <- max(2, which(dons_cum >= VAR_THRESHOLD)[1])
+cat("PCs selected:", dons_npc,
+    sprintf("(%.1f%% variance)\n", dons_cum[dons_npc]*100))
+dons_df$cluster <- as.character(run_leiden(dons_pca$x[, 1:dons_npc, drop=FALSE]))
+dons_nclust <- length(unique(dons_df$cluster))
+cat("Clusters found:", dons_nclust, "\n")
+cat("Cells per cluster:\n"); print(table(dons_df$cluster))
+cat("Cluster x sort gate:\n"); print(table(dons_df$cluster, dons_df$gate))
+
+dons_pal <- setNames(scales::hue_pal()(dons_nclust), sort(unique(dons_df$cluster)))
+
+# -- UMAPs ---------------------------------------------------------------------
+mk_umap <- function(colvar, pal, title, sub, legend) {
+  ggplot(dons_df, aes(x=UMAP1, y=UMAP2, color=.data[[colvar]])) +
+    geom_point(size=2, alpha=0.85) +
+    scale_color_manual(values=pal) +
+    labs(title=title, subtitle=sub, color=legend) +
+    theme_bw(base_size=12) +
+    theme(plot.title=element_text(face="bold", size=12),
+          plot.subtitle=element_text(size=9, color="grey40"),
+          panel.grid.minor=element_blank(), aspect.ratio=1)
+}
+dons_sub <- paste0("Clarke/Don GSE292898 mouse, standalone | n=", nrow(dons_df),
+                   " cells >= ", NOFILT_MIN_GENES, " genes\nUMAP: top ",
+                   length(dons_hvg), " HVGs | Clusters: all-gene PCA | resolution=",
+                   LEIDEN_RESOLUTION)
+ggsave(file.path(dons_dir, paste0("umap_dons_all", nrow(dons_df), "_by_cluster.pdf")),
+       mk_umap("cluster", dons_pal,
+               paste0("Clarke/Don 2025 - ", nrow(dons_df), " cells by Leiden cluster"),
+               dons_sub, "Cluster"), width=7.5, height=6)
+cat("Saved: umap_dons_all", nrow(dons_df), "_by_cluster.pdf\n", sep="")
+
+ggsave(file.path(dons_dir, "umap_dons_by_sort_gate.pdf"),
+       mk_umap("gate", c(CD45pos="#2166AC", CD45neg="#B2182B"),
+               "Clarke/Don 2025 - by published sort gate", dons_sub, "Sort gate"),
+       width=7.5, height=6)
+cat("Saved: umap_dons_by_sort_gate.pdf\n")
+
+# -- Cluster marker genes + heatmap --------------------------------------------
+cat("\nRunning Wilcoxon marker analysis (one-vs-rest)...\n")
+dons_cv <- setNames(dons_df$cluster, dons_df$cell_id)
+dons_markers <- list()
+for (cl in sort(unique(dons_cv))) {
+  ins  <- names(dons_cv)[dons_cv == cl]; outs <- names(dons_cv)[dons_cv != cl]
+  if (length(ins) < 3 || length(outs) < 3) {
+    cat("  Cluster", cl, "- too few cells, skipped\n"); next
+  }
+  l2 <- rowMeans(dons_expr[, ins, drop=FALSE]) -
+        rowMeans(dons_expr[, outs, drop=FALSE])
+  cand <- names(l2)[l2 >= MIN_LOG2FC]
+  cat("  Cluster", cl, "(n=", length(ins), "): ", length(cand), " candidates\n", sep="")
+  if (!length(cand)) { dons_markers[[cl]] <- data.frame(); next }
+  pv <- sapply(cand, function(g)
+          wilcox.test(dons_expr[g, ins], dons_expr[g, outs],
+                      alternative="greater", exact=FALSE)$p.value)
+  dons_markers[[cl]] <- data.frame(gene=cand, log2FC=round(l2[cand],4),
+                                   padj=signif(p.adjust(pv, "BH"),4),
+                                   stringsAsFactors=FALSE) %>%
+    filter(padj < MAX_PADJ) %>% arrange(desc(log2FC)) %>%
+    distinct(gene, .keep_all=TRUE)
+  cat("    significant:", nrow(dons_markers[[cl]]),
+      "| top:", if (nrow(dons_markers[[cl]])) dons_markers[[cl]]$gene[1] else "none", "\n")
+}
+
+dons_hm <- c()
+for (cl in names(dons_markers))
+  if (nrow(dons_markers[[cl]]))
+    dons_hm <- c(dons_hm, head(setdiff(dons_markers[[cl]]$gene, dons_hm), TOP_HEATMAP))
+cat("Heatmap genes:", length(dons_hm), "\n")
+
+if (length(dons_hm) >= 2) {
+  ord  <- dons_df$cell_id[order(as.integer(dons_df$cluster))]
+  z    <- t(scale(t(dons_expr[dons_hm, ord, drop=FALSE])))
+  z[z >  2.5] <-  2.5; z[z < -2.5] <- -2.5
+  z    <- z[rowSums(is.na(z)) == 0, , drop=FALSE]
+  ha   <- HeatmapAnnotation(
+            Cluster = dons_df$cluster[match(ord, dons_df$cell_id)],
+            Gate    = dons_df$gate[match(ord, dons_df$cell_id)],
+            col     = list(Cluster = dons_pal,
+                           Gate    = c(CD45pos="#2166AC", CD45neg="#B2182B")),
+            annotation_name_side="left")
+  ht <- Heatmap(z, name="Z-score",
+                col=colorRamp2(c(-2.5,0,2.5), c("#3D0751","#1A1A1A","#F5E642")),
+                top_annotation=ha, show_column_names=FALSE, show_row_names=TRUE,
+                row_names_gp=gpar(fontsize=7, fontface="italic"),
+                cluster_rows=FALSE, cluster_columns=FALSE, row_title=NULL,
+                column_title=paste0("Clarke/Don cluster markers - ", nrow(z),
+                                    " genes x ", ncol(z), " cells"),
+                column_title_gp=gpar(fontsize=12, fontface="bold"),
+                heatmap_legend_param=list(title="Z-score\n(VST)",
+                                          legend_height=unit(3,"cm")),
+                use_raster=TRUE, raster_quality=5, raster_device=HT_RASTER_DEVICE)
+  pdf(file.path(dons_dir, "heatmap_cluster_markers.pdf"),
+      width=16, height=max(8, nrow(z)*0.18+3))
+  draw(ht, heatmap_legend_side="right", annotation_legend_side="bottom")
+  dev.off()
+  cat("Saved: heatmap_cluster_markers.pdf\n")
+} else cat("Too few marker genes for a heatmap - skipped\n")
+
+# -- Violins for the requested genes -------------------------------------------
+cat("\nGenerating violin plots for", paste(DONS_GENES, collapse=", "), "...\n")
+dons_lib <- pmax(colSums(dons_cnt), 1)
+dons_have <- intersect(DONS_GENES, rownames(dons_expr))
+if (length(setdiff(DONS_GENES, dons_have)))
+  cat("  not in the matrix:", paste(setdiff(DONS_GENES, dons_have), collapse=", "), "\n")
+
+if (length(dons_have)) {
+  vp <- lapply(dons_have, function(g) {
+    d <- data.frame(cluster=factor(dons_df$cluster,
+                                   levels=sort(unique(as.integer(dons_df$cluster)))),
+                    VST=dons_expr[g, dons_df$cell_id],
+                    det=dons_cnt[g, dons_df$cell_id] > 0)
+    # Detection per cluster on the axis: VST is compressive, so a gene that is
+    # off in most cells piles up at the floor and the shape alone cannot
+    # distinguish "absent" from "present in a minority".
+    lab <- sapply(levels(d$cluster), function(k) {
+      dd <- d[d$cluster == k, ]
+      sprintf("%s\nn=%d, %d det (%.0f%%)", k, nrow(dd), sum(dd$det), 100*mean(dd$det))
+    })
+    ggplot(d, aes(x=cluster, y=VST, fill=cluster)) +
+      geom_violin(trim=TRUE, scale="width", alpha=0.85, linewidth=0.3) +
+      geom_jitter(width=0.15, size=0.9, alpha=0.5, color="grey15") +
+      scale_fill_manual(values=dons_pal) + scale_x_discrete(labels=lab) +
+      labs(title=g, subtitle=sprintf("detected in %d/%d cells overall",
+                                     sum(d$det), nrow(d)),
+           x="Leiden cluster", y="VST expression") +
+      theme_bw(base_size=11) +
+      theme(plot.title=element_text(face="bold.italic", size=12),
+            plot.subtitle=element_text(size=8, color="grey40"),
+            legend.position="none", panel.grid.minor=element_blank())
+  })
+  panel <- wrap_plots(vp, ncol=2) +
+    plot_annotation(title="Clarke/Don 2025 - marker expression by cluster",
+                    subtitle=dons_sub,
+                    theme=theme(plot.title=element_text(face="bold", size=13),
+                                plot.subtitle=element_text(size=9, color="grey40")))
+  ggsave(file.path(dons_dir, "violin_markers_by_cluster.pdf"), panel,
+         width=11, height=5*ceiling(length(vp)/2))
+  cat("Saved: violin_markers_by_cluster.pdf\n")
+
+  cat("\n  Detection by cluster:\n")
+  for (g in dons_have) {
+    cat("   ", g, ":", paste(sapply(sort(unique(dons_df$cluster)), function(k) {
+      cs <- dons_df$cell_id[dons_df$cluster == k]
+      sprintf("c%s %d/%d", k, sum(dons_cnt[g, cs] > 0), length(cs))
+    }), collapse="  "), "\n")
+  }
+}
+
+# -- Marker workbook -----------------------------------------------------------
+wb_d <- createWorkbook()
+summ <- do.call(rbind, lapply(names(dons_markers), function(cl) data.frame(
+  cluster=cl, n_cells=sum(dons_cv==cl),
+  n_CD45pos=sum(dons_gate[names(dons_cv)[dons_cv==cl]]=="CD45pos"),
+  n_CD45neg=sum(dons_gate[names(dons_cv)[dons_cv==cl]]=="CD45neg"),
+  n_markers=nrow(dons_markers[[cl]]),
+  top_markers=paste(head(dons_markers[[cl]]$gene,10), collapse=", "),
+  stringsAsFactors=FALSE)))
+addWorksheet(wb_d, "Summary"); writeData(wb_d, "Summary", summ)
+setColWidths(wb_d, "Summary", cols=1:6, widths=c(9,9,11,11,11,70))
+for (cl in names(dons_markers)) {
+  if (!nrow(dons_markers[[cl]])) next
+  sn <- paste0("Cluster_", cl)
+  addWorksheet(wb_d, sn); writeData(wb_d, sn, head(dons_markers[[cl]], TOP_EXCEL))
+  setColWidths(wb_d, sn, cols=1:3, widths=c(16,12,12))
+}
+addWorksheet(wb_d, "Notes")
+writeData(wb_d, "Notes", data.frame(Note=c(
+  "Clarke/Don GSE292898 mouse data analysed ALONE - none of your cells are included.",
+  "No MHCII filter, no cross-plate gene intersection, no batch correction (single dataset).",
+  paste0("Depth floor: >= ", NOFILT_MIN_GENES, " genes detected per cell."),
+  "Sort gate is read from the published column names (cd45POS / cd45NEG), not inferred from well position.",
+  "VST is blind=TRUE, so the transformation is not informed by the sort gate; clustering is unsupervised.",
+  "No VAF/VRC labels are applied here. GSE292898 ships no cell-type annotation - the 'cell type' column is empty for all samples - so any VAF/VRC split elsewhere in this pipeline is reconstructed, not published.",
+  "Cluster IDs are re-derived every run and are not comparable across runs."),
+  stringsAsFactors=FALSE))
+setColWidths(wb_d, "Notes", cols=1, widths=125)
+saveWorkbook(wb_d, file.path(dons_dir, "cluster_marker_genes.xlsx"), overwrite=TRUE)
+cat("Saved: cluster_marker_genes.xlsx\n")
+
+cat("\nDonsPaper complete. Files:\n")
+for (f in list.files(dons_dir)) cat(" -", f, "\n")
+
+} # end DonsPaper
+
 cat("\n==============================================================\n")
 cat("All outputs complete. Output structure:\n")
 if (RUN_PER_STRAIN_PLOTS) {
@@ -4418,4 +4907,13 @@ cat("   - GOI_expression_by_cell.xlsx\n")
 cat("   - expression_all_genes_by_cell_VST.csv\n")
 cat("   - expression_all_genes_by_cell_counts.csv\n")
 if (NF_RUN_CLUSTER_OUTPUTS) cat("   - (legacy cluster outputs also written)\n")
+if (RUN_DONSPAPER) {
+  cat(" results/05_dge/DonsPaper/  (Clarke/Don GSE292898 alone)\n")
+  cat("   - umap_dons_all*_by_cluster.pdf\n")
+  cat("   - umap_dons_by_sort_gate.pdf\n")
+  cat("   - heatmap_cluster_markers.pdf\n")
+  cat("   - violin_markers_by_cluster.pdf  (",
+      paste(DONS_GENES, collapse=", "), ")\n", sep="")
+  cat("   - cluster_marker_genes.xlsx\n")
+}
 cat("==============================================================\n")

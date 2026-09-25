@@ -53,7 +53,12 @@ FASTQ (R1/R2 per cell)
                 ├── Per-cell lineage typing (curated marker panels)
                 ├── UMAP colored by cell type
                 ├── Violins of genes of interest within focus cell types
-                └── Per-cell expression workbook + all-genes CSVs
+                ├── Per-cell expression workbook + all-genes CSVs
+                └── (all embeddings are per-plate batch corrected)
+        └── DonsPaper analysis (Clarke/Don GSE292898 ALONE, no cells of yours)
+                ├── UMAP by Leiden cluster + UMAP by published sort gate
+                ├── Cluster marker heatmap + marker workbook
+                └── Violins of Ptprc / Col1a1 / Col1a2 / Pecam1 per cluster
 ```
 
 ---
@@ -82,7 +87,7 @@ Edit `data/metadata.csv` — one row per cell with columns:
 
 See `data/metadata_example.csv` for format reference.
 
-**Plate layouts currently in `data/metadata.csv`** (564 cells):
+**Plate layouts currently in `data/metadata.csv`** (660 cells):
 
 | Plate (`strain`) | `strain_group` | `batch` | Layout |
 |---|---|---|---|
@@ -92,6 +97,7 @@ See `data/metadata_example.csv` for format reference.
 | NOD2 | NOD | batch2 | A1–A12 CD45+ MHCII+ · 42 MHCIIhi / 42 MHCIIlo |
 | NODPDL1 | NODPDL1 | batch3 | A1–B6 CD45+ MHCII+ (18) · B7–H12 CD45− MHCII+ (78) |
 | NODCD31 | NODCD31 | batch4 | A1–B6 CD45− MHCII+ **CD31−** (18) · B7–H12 CD45− MHCII+ **CD31+** (78) |
+| NODPDL1_2 | NODPDL1 | batch5 | A1–A12 CD45+ MHCII+ PDL1+ (12) · B1–E6 CD45− MHCII+ PDL1+ (42) · E7–H12 CD45− **MHCII−** PDL1+ (42) |
 
 NODCD31 has **no CD45+ MHCII+ wells** — it reuses NODPDL1's 18/78 well split but
 puts CD31− where the reference block normally sits. See *Per-strain
@@ -146,6 +152,11 @@ Rscript scripts/per_strain_plots.R 2>&1 | tee per_strain_plots.log
 
 > **Warning:** This script wipes and rebuilds `results/05_dge/` entirely on every run.
 > Upstream folders (01-04, qc_summary) are never touched.
+
+> **Trimmomatic heap.** `pipeline.py` invokes `trimmomatic -Xmx8g`. The bioconda
+> wrapper hardcodes a 1 GB JVM heap, which OOMs
+> (`Trim Stats Collector Exception -> OutOfMemoryError`) on lane-merged FASTQs —
+> a 147 MB R1 was enough. Without the flag, most of a lane-merged plate fails.
 
 ---
 
@@ -478,6 +489,60 @@ Individual contrasts are skipped when either side has fewer than 3 cells.
 
 ### VAF/VRC correlation (Clarke et al. 2025, GSE292898)
 
+> ## ⚠ The "VAF" reference is not fibroblasts. Do not use it as one.
+>
+> GSE292898 ships **no cell-type labels** — the `cell type` column is empty for
+> all 602 samples; only the sort gate is published. So VAF/VRC here are
+> **reconstructed** by k-means (k=2) on the Clarke CD45− cells, and that
+> reconstruction does not recover fibroblasts.
+>
+> Measured directly on the published matrix:
+>
+> | Reconstructed group | n | What it actually contains |
+> |---|---|---|
+> | "VAF" | 51 | 24 endocrine, 21 immune, **6 fibroblast** |
+> | "VRC" | 44 | **38 endothelial** — 86% clean |
+>
+> Marker detection inside the "VAF" group: `Col1a1` 7.8%, `Dcn` 3.9%,
+> `Pdgfra` 2.0% — against `Ins2` 74.5%, `Gcg` 70.6%.
+>
+> **Mechanism.** k=2 is asked to split a population containing at least four
+> cell types. Endothelium is the most transcriptionally distinct, so it takes
+> one cluster cleanly; endocrine + immune + a few fibroblasts become "VAF" by
+> default. The orientation scores show it — the endothelial cluster scores
+> −3.45 while the "VAF" cluster manages only **+0.50**. It is not
+> fibroblast-like, it is *less endothelial*.
+>
+> **This is not fixable by better clustering.** Across all 95 Clarke CD45−
+> MHCII+ cells, only **8 carry ≥3 fibroblast markers** (3 carry ≥5), versus 45
+> carrying ≥3 endothelial markers. The cells are not in the dataset. No choice
+> of k, no algorithm, and no batch correction recovers a population with ~8
+> members.
+>
+> **Consequence:** a cluster matching "VAF" is matching a mostly-endocrine
+> centroid. `cluster_pairwise_contrasts.xlsx` baselines every contrast on that
+> same cluster and inherits the problem. For fibroblast comparisons use your own
+> cells — NoMHCIIFilter's per-cell typing finds 25–27.
+
+#### Confidence gating on the best match
+
+`best_match` used to be reported with no margin and no floor, so a statistical
+tie and a genuine match were formatted identically. A call is now only reported
+when it clears **both** tests, and is otherwise blanked to `unresolved` with a
+`why_unresolved` reason:
+
+| Constant | Default | Test |
+|---|---|---|
+| `MIN_CORR_R` | 0.50 | the winning Pearson r must reach this |
+| `MIN_CORR_MARGIN` | 0.05 | ...and beat the runner-up by at least this |
+
+The Summary sheet gains `confident`, `runner_up`, `runner_up_r`, `margin`, and
+`why_unresolved`; unresolved rows are highlighted. Per-cluster sheets still
+carry every raw correlation, so nothing is hidden. The thresholds are round
+numbers chosen to separate observed cases, not derived — adjust if they flag
+something you consider real.
+
+
 Two distinct steps that are easy to conflate. **Marker genes are not used to
 decide a cluster's identity.**
 
@@ -799,6 +864,106 @@ merged dataset. The other 5 output folders are completely unaffected.
 
 ---
 
+## DonsPaper — the Clarke/Don data on its own
+
+`results/05_dge/DonsPaper/` analyses GSE292898 **alone**: no cells of yours, no
+MHCII filter, no cross-plate gene intersection, no VAF/VRC reconstruction, no
+batch correction (single dataset). It also works in Clarke's own gene-symbol
+space rather than mapping through your Ensembl IDs, because mapping first would
+silently drop genes absent from your plates.
+
+Outputs: UMAP by Leiden cluster, UMAP by published sort gate, cluster marker
+heatmap, marker workbook, and violins of `DONS_GENES`
+(`Ptprc`, `Col1a1`, `Col1a2`, `Pecam1`) per cluster with per-cluster detection
+counts on the axis labels.
+
+### Reproducing the paper's 3 clusters
+
+The paper reports **3 clusters**: fibroblastic (green), vascular (blue), and
+CD45+ (purple), from **142** retained cells. Our default settings give **2**.
+The difference is entirely **filtering**, not clustering — and applying their
+filters reproduces their result exactly:
+
+| | This pipeline's default | Clarke et al. |
+|---|---|---|
+| Cell filter | ≥500 **genes detected** | ≥1000 **total counts** |
+| MHC-II | none in DonsPaper | **required** ("only cells with MHC class II transcript") |
+| Normalisation | DESeq2 VST | Seurat `LogNormalize` + scale |
+| Clustering | Leiden on 80%-variance PCs | Seurat/Louvain on ~20 PCs |
+| Cells retained | 160 | **142** |
+
+Applying `total counts >= 1000` AND `any MHC-II transcript` yields **exactly
+142 cells** and 3 clusters, stable across resolutions 0.3–0.8:
+
+| Cluster | n | CD45pos | Ptprc | Pecam1 | Col1a1 | = paper's |
+|---|---|---|---|---|---|---|
+| 1 | 33 | 18/22 | 31/33 (94%) | 10/33 | 1/33 | CD45+ (purple) |
+| 2 | 51 | 4 | 7/51 | 23/51 | 7/51 | fibroblastic (green) |
+| 3 | 58 | 0 | 3/58 | 56/58 (97%) | 0/58 | vascular (blue) |
+
+The MHC-II transcript requirement is doing most of the work: it removes 22 cells
+that otherwise blur the CD45+/fibroblastic boundary.
+
+> **Note even their fibroblastic cluster is collagen-sparse** — `Col1a1` in 7 of
+> 51 cells (14%), `Pecam1` in 23 of 51 (45%). The label reflects relative
+> enrichment, not most cells being collagen-positive.
+
+> **Deposit/paper discrepancy.** The paper states 114 CD45− and 50 CD45+ cells
+> sorted (98 + 44 analysed). The GEO deposit contains **164 CD45neg and 24
+> CD45pos**. Their filters recover the right *total* (142) but a different split
+> (120 + 22). The deposit's composition does not match the figure's description.
+
+---
+
+## Per-plate batch correction
+
+`BATCH_CORRECT_BY_PLATE <- TRUE` applies `limma::removeBatchEffect` with **plate
+as the batch** to the merged and NoMHCIIFilter embeddings.
+
+**Why it is needed.** Size factors are estimated from each plate's *own*
+reference wells, so every plate is scaled to a different baseline and the
+normalisation itself imposes a plate-specific offset. Measured on the CD45+
+reference cells — nominally the same population on 6 plates, so any separation
+between them is technical:
+
+| | Raw log-CPM | Per-plate VST (what clustering consumes) | After correction |
+|---|---|---|---|
+| PC1 | 1.3% | **20.5%** | 2.6% |
+| PC1–10 combined | 13.3% | **23.3%** | **6.8%** |
+
+The normalisation *amplifies* plate structure into the dominant components.
+Measuring this on raw log-CPM instead of VST gives a falsely reassuring answer —
+that mistake was made once in this project and led to the wrong conclusion.
+
+The visible symptom was NODPDL1_2 landing **47/47 in a single cluster**, both
+subgates together. After correction it spreads 43% / 21% / 34%.
+
+**Condition labels must be harmonised first.** 6 of 9 raw conditions exist on
+exactly one plate (all three of NODPDL1_2's, both of NODCD31's), which makes
+`~ plate + condition` rank deficient — 13 of 15 columns. `harmonise_condition()`
+collapses only the single-plate labels into the nearest label spanning several
+plates, restoring full rank (11 of 11). MHCIIhi/MHCIIlo span 4 plates and are
+deliberately kept.
+
+> **What this does NOT remove.** The batch offset is one scalar per plate per
+> gene applied to every cell on that plate. Differences *within* a plate — CD31+
+> vs CD31−, MHCIIhi vs MHCIIlo, VAF vs VRC — shift identically and are fully
+> preserved. Only how a plate sits relative to other plates is removed.
+
+`apply_plate_correction()` re-checks the design rank at run time and **skips
+correction with a logged message** rather than returning a half-corrected
+matrix. Constant genes are held out and re-attached unchanged.
+
+> **Known unexplained failure.** After correction, `prcomp` fails on the real
+> matrix with `error code 1 from Lapack routine 'dgesdd'` — while succeeding on
+> random matrices of identical dimensions, with every value finite and the range
+> unremarkable ([-11, 26]). `run_umap()` falls back to an eigendecomposition of
+> the Gram matrix (`x x' = U D^2 U'`, scores `U D`), which is the same PCA via
+> `dsyevr` instead of `dgesdd`. The results are sound but the root cause was
+> never found. The offending matrix is dumped to `tempdir()` on failure.
+
+---
+
 ## Which analyses run
 
 `scripts/per_strain_plots.R` has four switches near the top. Turning the first
@@ -869,6 +1034,11 @@ as before.
 | `NF_AMBIGUOUS_MARGIN` | 0.25 | Below this top-vs-runner-up gap a cell is flagged `ambiguous` (still counted in its top type) |
 | `NF_LINEAGE_PANELS` | 6 curated panels | Marker panels used for per-cell typing. See the provenance warning above before publishing |
 | `NF_RUN_CLUSTER_OUTPUTS` | FALSE | Restore the legacy Leiden-cluster outputs in NoMHCIIFilter |
+| `BATCH_CORRECT_BY_PLATE` | TRUE | Per-plate `removeBatchEffect` on the merged and NoMHCIIFilter embeddings |
+| `MIN_CORR_R` | 0.50 | VAF/VRC: minimum winning Pearson r before a call is reported |
+| `MIN_CORR_MARGIN` | 0.05 | VAF/VRC: minimum gap to the runner-up before a call is reported |
+| `RUN_DONSPAPER` | TRUE | `results/05_dge/DonsPaper/` — Clarke data analysed alone |
+| `DONS_GENES` | Ptprc, Col1a1, Col1a2, Pecam1 | Genes given a per-cluster violin in DonsPaper |
 | `NF_VIOLIN_GENES` | c("Ciita", "Nod2") | Legacy cluster-violin path only |
 
 `VIOLIN_GENES` is defined in the config block at the top of
@@ -966,7 +1136,7 @@ python qc_summary.py --config config.yaml               # QC flagging
   (a pure CD31 sort contains no fibroblasts). All three are real measurements, not QC
   failures — see the violin-gene filter exemption above.
 - **Batches:** B6G7 and B6MHCIIGFP = batch1 (L001); NOD and NOD2 = batch2 (L002); NODPDL1 =
-  batch3 (L001+L002 merged); NODCD31 = batch4
+  batch3 (L001+L002 merged); NODCD31 = batch4; NODPDL1_2 = batch5 (L001+L002 merged)
 - **Normalization reference:** `CD45pos_MHCIIpos` wells, per plate (well range varies by plate —
   see metadata)
 - **Contrasts:** built dynamically per plate from whichever conditions are present (3 contrasts
