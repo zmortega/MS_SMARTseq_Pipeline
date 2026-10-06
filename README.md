@@ -26,7 +26,7 @@ FASTQ (R1/R2 per cell)
     ▼
 [5] per_strain_plots.R
         ├── Metadata/count-matrix alignment (meta reordered to colnames(counts))
-        ├── MHCII expression filter (H2-Aa & H2-Ab1, applied globally)
+        ├── MHCII transcript gate (H2-Aa OR H2-Ab1 present; sorted MHCII− cells bypass)
         ├── Per-strain DESeq2 (independent per plate, normalized to that plate's own reference wells)
         │       ├── Volcano + violin plots (1 pair per contrast — contrasts built dynamically
         │       │     from whichever conditions are present, e.g. 3 for MHCIIhi/lo plates, 1 for NODPDL1)
@@ -43,22 +43,32 @@ FASTQ (R1/R2 per cell)
         │       ├── Cell identity Excel (CellMarker 2.0 gene set scoring)
         │       ├── VAF/VRC correlation Excel (Clarke et al. 2025, GSE292898)
         │       └── MCA cell type correlation Excel (Mouse Cell Atlas)
-        ├── Combined + Clarke 2025 analysis (your cells + Clarke et al. mouse data)
-        │       ├── Same outputs as combined analysis above
+        ├── ClarkeOnly analysis (Clarke/Don GSE292898 ALONE, no cells of yours)
+        │       │     RUNS FIRST — the Combined analysis consumes its output
+        │       ├── UMAP by Leiden cluster + UMAP by published sort gate
+        │       ├── Cluster marker heatmap + marker workbook
+        │       ├── Violins of Ptprc / Col1a1 / Col1a2 / Pecam1 per cluster
+        │       └── VAF / VRC / CD45pos reference profiles  ──┐
+        │                                                       │
+        ├── Combined analysis (your cells + Clarke et al. mouse data)  │
+        │       ├── Combined UMAP (by Leiden cluster + by strain/population)
+        │       ├── Per-strain panels on the merged UMAP
+        │       ├── Per-cell UMAP coordinate CSV (traceable back to plate/condition)
+        │       ├── Cluster composition bar charts
+        │       ├── Cluster marker genes + heatmap + violins
         │       ├── Pairwise cluster contrasts vs VAF / VRC (two-sided, up + down)
+        │       ├── VAF/VRC correlation Excel  <── scored against the reference above
+        │       ├── Cell identity + MCA cell type correlation Excel
         │       ├── limma batch correction applied before embedding
         │       └── Clarke cells treated as additional strain "Clarke2025"
-        └── NoMHCIIFilter analysis (all sorted cells, MHCII filter bypassed,
+        └── NoMHCIIFilter analysis (all sorted cells, MHCII gate bypassed,
                     depth floor only)
                 ├── Per-cell lineage typing (curated marker panels)
                 ├── UMAP colored by cell type
+                ├── Per-cell UMAP coordinate CSV
                 ├── Violins of genes of interest within focus cell types
                 ├── Per-cell expression workbook + all-genes CSVs
                 └── (all embeddings are per-plate batch corrected)
-        └── DonsPaper analysis (Clarke/Don GSE292898 ALONE, no cells of yours)
-                ├── UMAP by Leiden cluster + UMAP by published sort gate
-                ├── Cluster marker heatmap + marker workbook
-                └── Violins of Ptprc / Col1a1 / Col1a2 / Pecam1 per cluster
 ```
 
 ---
@@ -223,20 +233,31 @@ results/
 │   │   ├── cell_identity_combined_clusters.xlsx
 │   │   ├── VAF_VRC_correlation_combined_clusters.xlsx
 │   │   └── MCA_celltype_correlation_combined_clusters.xlsx
-│   └── CombinedwithVAFPaperPlots/
-│       ├── umap_merged_by_cluster.pdf
-│       ├── umap_merged_by_strain_population.pdf
-│       ├── umap_per_strain_on_merged.pdf
-│       ├── barplots_cluster_composition.pdf
-│       ├── cluster_marker_genes.xlsx
-│       ├── cluster_pairwise_contrasts.xlsx      (merged folder only)
-│       ├── heatmap_cluster_markers.pdf
-│       ├── violin_plots_by_cluster.pdf
-│       ├── cell_identity_merged_clusters.xlsx
-│       ├── VAF_VRC_correlation_merged_clusters.xlsx
-│       └── MCA_celltype_correlation_merged_clusters.xlsx
+│   ├── ClarkeOnly/                                (GSE292898 alone — builds the VAF/VRC reference)
+│   │   ├── clarke_reference_profiles.csv          (the reference the Combined analysis scores against)
+│   │   ├── clarke_reference_profiles.rds
+│   │   ├── umap_co2_all141_by_cluster.pdf         (cell count is derived)
+│   │   ├── umap_clarke_by_population.pdf
+│   │   ├── umap_co2_by_sort_gate.pdf
+│   │   ├── heatmap_cluster_markers.pdf
+│   │   ├── violin_markers_by_cluster.pdf
+│   │   └── cluster_marker_genes.xlsx
+│   ├── Combined/
+│   │   ├── umap_merged_by_cluster.pdf
+│   │   ├── umap_merged_by_strain_population.pdf
+│   │   ├── umap_per_strain_on_merged.pdf
+│   │   ├── umap_coordinates_by_cell.csv           (per-cell UMAP coords + cluster/plate/condition)
+│   │   ├── barplots_cluster_composition.pdf
+│   │   ├── cluster_marker_genes.xlsx
+│   │   ├── cluster_pairwise_contrasts.xlsx        (Combined only)
+│   │   ├── heatmap_cluster_markers.pdf
+│   │   ├── violin_plots_by_cluster.pdf
+│   │   ├── cell_identity_merged_clusters.xlsx
+│   │   ├── VAF_VRC_correlation_merged_clusters.xlsx
+│   │   └── MCA_celltype_correlation_merged_clusters.xlsx
 │   └── NoMHCIIFilter/
-│       ├── umap_all454_by_cell_type.pdf               (cell count is derived)
+│       ├── umap_all514_by_cell_type.pdf               (cell count is derived)
+│       ├── umap_coordinates_by_cell.csv               (per-cell UMAP coords + cell type/plate/condition)
 │       ├── violin_GOI_by_cell_type.pdf
 │       ├── GOI_expression_by_cell.xlsx
 │       ├── expression_all_genes_by_cell_VST.csv
@@ -275,14 +296,41 @@ hard error; metadata rows with no count column are reported and dropped.
 
 ### MHCII expression filter
 
-Applied globally before any analysis. A cell is retained only if both **H2-Aa**
-and **H2-Ab1** exceed a minimum log1p(CPM) threshold (default: log1p(5)).
-Cells failing this filter are excluded from all downstream analyses.
+Applied globally before any analysis. Matches Clarke et al.'s stated criterion —
+*"only cells with MHC class II transcript were included in analysis"* — which is
+**presence/absence in either chain**, not a quantitative floor in both:
 
 ```r
-MHCII_VST_MIN <- 1.0
-MHCII_GENES   <- c("H2-Aa", "H2-Ab1")
+MHCII_GENES      <- c("H2-Aa", "H2-Ab1")
+MHCII_MIN_COUNT  <- 1     # raw counts to call a chain "detected"
+MHCII_REQUIRE_N  <- 1     # chains required: 1 = either (Clarke), 2 = both
+MHCII_BYPASS_SORTED_NEG <- TRUE
 ```
+
+The test runs on **raw counts**, not VST or CPM. Asking "is the transcript
+present" does not need a normalised scale, and normalising first made the
+threshold depend on library size.
+
+**Sorted MHCII-negative cells bypass the gate entirely** (`MHCII_BYPASS_SORTED_NEG`).
+The gate exists to confirm that cells sorted MHCII-**positive** really carry the
+transcript. Applying it to cells deliberately sorted MHCII-negative tests them
+against the opposite of their own gate and silently deletes the population you
+sorted on purpose. Bypass is keyed on `MHCIIneg` appearing in the condition name.
+
+Current run: **608 of 660 cells pass.** 42 sorted MHCII-negative cells bypass
+the gate, 7 of which would otherwise have been dropped.
+
+> **Two bugs this replaced, both silent.**
+>
+> 1. The filter required **both** chains at `log1p(CPM) >= log1p(5)` — stricter
+>    than Clarke on two independent axes at once (AND vs OR, CPM≥5 vs ≥1 count).
+>    It discarded 191 of 660 cells that the paper's own criterion retains.
+> 2. The constant that *appeared* to control it, `MHCII_VST_MIN <- 1.0`, **was
+>    never read by the filter.** The real threshold was a separate hardcoded
+>    `log1p(5)` while the console printed "VST 1". Tuning the visible knob did
+>    nothing and gave no indication that it had done nothing.
+>
+> The three constants above are now the only thing the filter consults.
 
 ### Per-strain normalization
 
@@ -331,10 +379,10 @@ gene symbols, jittered VST points).
 
 `common_genes <- Reduce(intersect, ...)` keeps only genes that survive **every**
 plate's `rowSums >= 10` filter, so a gene genuinely absent from one plate leaves the
-combined matrix for all plates. Current run: per-plate filters keep 11,206–17,375
-genes, and the intersection across all six plates is **8,948 genes**. The merged
-(your cells + Clarke) matrix intersects that again with Clarke's mappable genes:
-**7,772 genes × 469 cells**.
+combined matrix for all plates. Current run: per-plate filters keep 15,278–18,535
+genes, and the intersection across all seven plates is **11,759 genes**. The
+merged (your cells + Clarke) matrix intersects that again with Clarke's mappable
+genes: **10,218 genes × 755 cells**.
 
 This is not cosmetic. The combined UMAP picks HVGs from that intersection, so the
 gene set change reshuffles Leiden clustering for *every* plate — **cluster numbering
@@ -360,9 +408,10 @@ keep <- rowSums(s_counts) >= 10 | rownames(s_counts) %in% violin_keep_ens
 **A zero count is a measurement, not a missing value.** Exempting `VIOLIN_GENES`
 keeps real VST values — at the floor, where counts are zero — flowing through to
 `combined_expr` and `merged_expr`, so these genes are plottable *as zeros* rather
-than absent. All 18 violin genes now resolve in **6/6 plates** and in the merged
-matrix; the exemption force-retained 1–7 genes per plate that the filter would
-otherwise have dropped, and grew the intersection by 14 genes (8,934 → 8,948).
+than absent. All 18 violin genes now resolve in **7/7 plates** and in the merged
+matrix. (The gene-count growth attributable to the exemption was measured at
++14 genes on the earlier 6-plate roster; it has not been re-measured since, as
+it requires a deliberate A/B run with the exemption disabled.)
 
 **Cost:** exempted genes are forced into each plate's DESeq2 object even when
 all-zero there. Their own DE statistics on such a plate are meaningless (expect
@@ -376,7 +425,7 @@ nothing:
 | Panel | Behavior when a gene is still unavailable |
 |---|---|
 | `combined_plots/violin_plots_by_cluster.pdf` | Sources each gene from the **per-plate** VST matrices (`all_expr_list`), not from `combined_expr`. Plots from whichever plates retain the gene; the panel subtitle names the plates where it is absent. |
-| `CombinedwithVAFPaperPlots/violin_plots_by_cluster.pdf` | **Skipped for genes missing from `merged_expr`, with the reason logged.** Cannot use the per-plate fallback: `merged_expr` is `limma::removeBatchEffect`-corrected across your cells + Clarke, so an uncorrected per-plate value would put two scales on one axis. |
+| `Combined/violin_plots_by_cluster.pdf` | **Skipped for genes missing from `merged_expr`, with the reason logged.** Cannot use the per-plate fallback: `merged_expr` is `limma::removeBatchEffect`-corrected across your cells + Clarke, so an uncorrected per-plate value would put two scales on one axis. |
 
 Combined UMAP filenames embed the actual cell count (`umap_all351_by_cluster.pdf`)
 and are derived at runtime — the previously hardcoded `umap_all372_*` names silently
@@ -431,6 +480,28 @@ plates share a panel) showing that group's cells on shared comprehensive UMAP co
 colored by comprehensive cluster assignment. Colors and legend sizing scale dynamically with
 however many strain groups/conditions are present, rather than a fixed 4×3 palette.
 
+### Per-cell UMAP coordinates (`umap_coordinates_by_cell.csv`)
+
+Both `Combined/` and `NoMHCIIFilter/` write the embedding itself, not just the
+picture: one row per cell with `UMAP1`, `UMAP2`, cluster (or cell type), and the
+plate/condition fields.
+
+Without it, a question as basic as *"which sample are those outlying points
+from?"* can only be answered by re-running the whole script. With it:
+
+```bash
+awk -F, 'NR==1 || ($2>18 && $3<-8)' results/05_dge/Combined/umap_coordinates_by_cell.csv
+```
+
+> **This file was silently missing from `NoMHCIIFilter/` on first implementation.**
+> The `write.csv` was placed inside the `if (NF_RUN_CLUSTER_OUTPUTS)` block,
+> which is `FALSE` by default, so the call never executed and no error was
+> raised — the folder simply lacked a file nobody had looked for yet. It now
+> sits on the per-cell-type path, which always runs. `nf_df` also carries only
+> UMAP/typing columns, so `strain` / `strain_group` / `condition` are joined back
+> on from `nf_meta`; without that join the export would have been written, but
+> useless for the one question it exists to answer.
+
 ### Cluster marker genes (Wilcoxon rank-sum)
 
 One-vs-rest Wilcoxon on VST matrix. Pre-filter: log2FC ≥ 0.5. BH correction.
@@ -441,7 +512,7 @@ to `log2FC >= MIN_LOG2FC`). It answers "what marks this cluster against all othe
 pooled" and **structurally cannot report depletion.** For the complementary question
 see the next section.
 
-### Pairwise cluster contrasts vs VAF / VRC (CombinedwithVAFPaperPlots only)
+### Pairwise cluster contrasts vs VAF / VRC (Combined only)
 
 `cluster_pairwise_contrasts.xlsx` answers a different question from
 `cluster_marker_genes.xlsx`: for an uncharacterized cluster, what is up **and down**
@@ -492,37 +563,38 @@ Individual contrasts are skipped when either side has fewer than 3 cells.
 > ## ⚠ The "VAF" reference is not fibroblasts. Do not use it as one.
 >
 > GSE292898 ships **no cell-type labels** — the `cell type` column is empty for
-> all 602 samples; only the sort gate is published. So VAF/VRC here are
-> **reconstructed** by k-means (k=2) on the Clarke CD45− cells, and that
-> reconstruction does not recover fibroblasts.
+> all 602 samples; only the sort gate is published. Every VAF/VRC/CD45pos
+> population in this pipeline is therefore **inferred**, not published.
 >
-> Measured directly on the published matrix:
+> The reference is now the **ClarkeOnly cluster centroids** (see below), and the
+> conclusion survived the change — it got *stronger*. Mean VST in the three
+> centroids actually used by the current run:
 >
-> | Reconstructed group | n | What it actually contains |
-> |---|---|---|
-> | "VAF" | 51 | 24 endocrine, 21 immune, **6 fibroblast** |
-> | "VRC" | 44 | **38 endothelial** — 86% clean |
+> | Marker class | CD45pos | **VAF** | VRC |
+> |---|---|---|---|
+> | Immune — `Ptprc` | **7.87** | −2.51 | −3.72 |
+> | Endothelial — `Pecam1` / `Cdh5` / `Plvap` | −2.24 / −4.37 / −3.69 | −1.04 / −4.07 / −1.57 | **9.91 / 8.74 / 13.91** |
+> | Fibroblast — `Col1a1` / `Pdgfra` / `Dcn` / `Lum` | −3.85 / −4.02 / −3.85 / −3.79 | **−2.86 / −3.34 / −3.03 / −3.25** | −4.09 / −4.37 / −3.97 / −4.09 |
+> | Endocrine — `Gcg` / `Ins2` / `Pcsk2` / `Chga` | 0.65 / 6.20 / −3.16 / −2.98 | **9.74 / 9.03 / 7.97 / 7.59** | −0.51 / 6.14 / −3.80 / −3.78 |
 >
-> Marker detection inside the "VAF" group: `Col1a1` 7.8%, `Dcn` 3.9%,
-> `Pdgfra` 2.0% — against `Ins2` 74.5%, `Gcg` 70.6%.
+> **Every fibroblast marker is negative in the VAF centroid. Every endocrine
+> marker is strongly positive.** Its top Wilcoxon marker is `Pcsk2`, and `Col1a1`
+> is detected in 5 of its 45 cells. `CD45pos` (Ptprc 7.9) and `VRC`
+> (Plvap 13.9, Pecam1 9.9) are by contrast cleanly identified and can be read at
+> face value — the problem is specific to VAF.
 >
-> **Mechanism.** k=2 is asked to split a population containing at least four
-> cell types. Endothelium is the most transcriptionally distinct, so it takes
-> one cluster cleanly; endocrine + immune + a few fibroblasts become "VAF" by
-> default. The orientation scores show it — the endothelial cluster scores
-> −3.45 while the "VAF" cluster manages only **+0.50**. It is not
-> fibroblast-like, it is *less endothelial*.
+> **This is not a clustering artifact.** Across all 95 Clarke CD45− MHCII+
+> cells, only **8 carry ≥3 fibroblast markers** (3 carry ≥5), versus 45 carrying
+> ≥3 endothelial markers. The cells are not in the dataset. No choice of
+> resolution, algorithm, or batch correction recovers a population with ~8
+> members. Clarke et al. themselves write that they could not determine a
+> convincing embryologic origin for this population.
 >
-> **This is not fixable by better clustering.** Across all 95 Clarke CD45−
-> MHCII+ cells, only **8 carry ≥3 fibroblast markers** (3 carry ≥5), versus 45
-> carrying ≥3 endothelial markers. The cells are not in the dataset. No choice
-> of k, no algorithm, and no batch correction recovers a population with ~8
-> members.
->
-> **Consequence:** a cluster matching "VAF" is matching a mostly-endocrine
-> centroid. `cluster_pairwise_contrasts.xlsx` baselines every contrast on that
-> same cluster and inherits the problem. For fibroblast comparisons use your own
-> cells — NoMHCIIFilter's per-cell typing finds 25–27.
+> **How to read a VAF match:** "this cluster resembles Clarke's CD45−
+> non-endothelial cells, which are predominantly endocrine." **Not** "this
+> cluster is fibroblastic." `cluster_pairwise_contrasts.xlsx` baselines every
+> contrast on the same population and inherits the caveat. For fibroblast
+> questions use your own cells — NoMHCIIFilter's per-cell typing finds 25–27.
 
 #### Confidence gating on the best match
 
@@ -548,23 +620,63 @@ decide a cluster's identity.**
 
 **1. Cluster → identity match: genome-wide, no marker list.** Each cluster's mean
 VST profile is correlated (Pearson *and* Spearman) against the mean profiles of
-VAF, VRC, and CD45pos, across **all shared genes — 7,772 in the merged
+VAF, VRC, and CD45pos, across **all shared genes — 10,215 in the merged
 analysis** (`n_genes` column in the output workbook). Both up- and
 down-regulation contribute; nothing is restricted to a marker panel. The
-correlations discriminate rather than saturating — in the current merged run
-cluster 3 is VAF 0.823 / VRC 0.592 / CD45pos 0.606, and cluster 4 is
-VAF 0.610 / VRC 0.877 / CD45pos 0.615 (Pearson, n_genes = 7,772).
+correlations discriminate rather than saturating — in the current merged run:
 
-**2. Clarke reference labeling: unsupervised split, marker-oriented naming.**
-Which *Clarke* cells count as VAF vs VRC is decided in two stages:
+| Cluster | VAF | VRC | CD45pos | Call |
+|---|---|---|---|---|
+| 1 | **0.808** | 0.570 | 0.603 | VAF |
+| 2 | 0.652 | 0.691 | **0.819** | CD45pos |
+| 3 | 0.215 | 0.400 | 0.378 | *unresolved* |
+| 4 | 0.626 | **0.850** | 0.633 | VRC |
+| 5 | **0.612** | 0.330 | 0.355 | VAF |
 
-- the **split** is unsupervised — PCA on the top 500 variable genes, then k-means
-  with k=2, using no marker information at all;
-- the **naming** uses the marker panels (Col1a1/Col1a2/Timp3/Spp1/Thy1/Pdpn for
-  VAF; Pecam1/Eng/Cdh5/Kdr/Tie1/Vwf for VRC) *only* to decide which of the two
-  k-means clusters gets called "VAF". Orientation scores both panels
-  (VAF markers minus VRC markers) so a cluster high in both cannot win by
-  default.
+(Pearson, n_genes = 10,215.) Cluster 3 fails both confidence tests and is
+correctly left uncalled.
+
+**2. Where the reference profiles come from: the ClarkeOnly centroids.**
+The reference is built by running Clarke's cells through **this same pipeline,
+alone** — the `ClarkeOnly` analysis — and taking its three cluster centroids:
+
+- the **split** is unsupervised: Leiden at `CLARKE_LEIDEN_RESOLUTION` on
+  all-gene PCs, using no marker information at all. It independently resolves
+  **exactly 3 clusters**, matching the paper's three populations;
+- the **naming** uses markers *only* to assign the three labels, strongest
+  signal first: highest mean `Ptprc` → CD45pos, then highest `Pecam1` → VRC,
+  remainder → VAF. The separation is unambiguous (Ptprc 7.87 vs −2.51/−3.72;
+  Pecam1 9.91 vs −2.24/−1.04);
+- if ClarkeOnly ever resolves something other than 3 clusters, the extras are
+  labelled `other_*`, **excluded** from the reference, and a warning is printed
+  — it does not silently fold them into a published population.
+
+The centroids are written to `ClarkeOnly/clarke_reference_profiles.csv` (and
+`.rds`), so the reference is inspectable rather than implicit. Switching
+`RUN_CLARKEONLY` off falls back to the legacy k-means reconstruction and says so
+loudly in the log; the two are on **different scales** (VST vs log1p(CPM)), so r
+values are not comparable between them.
+
+> **Two VAF/VRC definitions coexist in this script. Know which one you are reading.**
+>
+> | Consumer | Definition used |
+> |---|---|
+> | `VAF_VRC_correlation_*.xlsx` | **ClarkeOnly centroids** (VST) |
+> | Clarke cells' `VAF`/`VRC` labels in the merged UMAP and bar charts | k-means (k=2) split |
+> | `cluster_pairwise_contrasts.xlsx` baseline cluster | k-means split, via modal cluster |
+>
+> The k-means path still runs because it assigns a label to *individual* Clarke
+> cells, which a centroid cannot do. The two do not perfectly agree: the modal
+> merged cluster for k-means "VAF" cells is cluster 1 at only **46.3%**
+> (31/67 cells), against 98.3% (57/58) for VRC. Treat the pairwise-contrast VAF
+> baseline as the weaker of the two.
+
+**Legacy k-means path (fallback and per-cell labelling).** PCA on the top 500
+variable genes, then k-means with k=2; the **naming** uses the marker panels
+(Col1a1/Col1a2/Timp3/Spp1/Thy1/Pdpn for VAF; Pecam1/Eng/Cdh5/Kdr/Tie1/Vwf for
+VRC) *only* to decide which of the two clusters gets called "VAF". Orientation
+scores both panels (VAF markers minus VRC markers) so a cluster high in both
+cannot win by default.
 
 **Orientation runs in Clarke's own symbol space** (`vaf_cnt_mat2`, before the
 Ensembl reindexing and before any intersection with your genes). This is
@@ -624,8 +736,9 @@ sanity: collagen VAF 0.739 vs VRC 0.523 | endothelial VAF 0.149 vs VRC 6.178
 
 The **cluster assignment step is** unsupervised: HVG → PCA → UMAP → Leiden sees
 only expression, and population labels are attached afterward purely for
-coloring and tabulation. (Note the UMAP clusters are **Leiden**; k-means appears
-only in the Clarke labeling above.)
+coloring and tabulation. (Note the UMAP clusters are **Leiden**, as are the
+ClarkeOnly clusters the reference profiles come from; k-means appears only in the
+per-cell Clarke labeling above.)
 
 The **matrix fed into clustering is not fully label-blind**, in three places:
 
@@ -645,7 +758,7 @@ labels changes the merged clusters, not just the legend.
 
 ### CD45− MHCII+ cluster distribution sheet
 
-`VAF_VRC_correlation_merged_clusters.xlsx` (CombinedwithVAFPaperPlots) carries an
+`VAF_VRC_correlation_merged_clusters.xlsx` (Combined) carries an
 extra `CD45neg_Cluster_Distribution` sheet answering "where does each CD45−
 MHCII+ cell land, cluster-wise, per strain?" The CD45+ MHCII+ wells are
 normalization/reference only and are **excluded**; Clarke VAF/VRC cells are kept
@@ -679,8 +792,8 @@ sorted?", independent of the MHCII gate that defines every other folder.
 quality gate is still applied: a sequencing-depth floor of `NOFILT_MIN_GENES`
 (default **500 genes detected**, mirroring `MIN_GENES_DETECTED` in
 `config.yaml`). That is a data-quality criterion, not a biological one — no cell
-is included or excluded here on the basis of what it expresses. 564 sorted →
-**454 analyzed**, 110 removed.
+is included or excluded here on the basis of what it expresses. 660 sorted →
+**514 analyzed**, 146 removed.
 
 The method is deliberately **identical** to the `combined_plots` UMAP so the two
 are directly comparable — per-plate low-count filter (violin-gene exemption
@@ -690,12 +803,19 @@ UMAP for layout, plus a separate all-gene PCA → kNN → Leiden for the cluster
 assignment. Same tuning constants, same seed. **The only difference is which
 cells go in.**
 
-| | `combined_plots` | `NoMHCIIFilter` |
+| | MHCII-gated path | `NoMHCIIFilter` |
 |---|---|---|
-| Gate | MHCII expression | sequencing depth only |
-| Cells | 351 | 454 |
-| Genes in intersection | 8,948 | 12,049 |
-| Leiden clusters | 3 | 3 |
+| Gate | MHCII transcript present | sequencing depth only |
+| Cells | 608 | **514** |
+| Genes in intersection | 11,759 | **11,773** |
+
+Note the two gates are **not nested**: the MHCII gate keeps 608 of 660 cells and
+the depth floor keeps 514, but neither is a subset of the other — a cell can be
+MHCII-positive and shallow, or deep and MHCII-negative. The `combined_plots`
+columns previously quoted here came from a run with `RUN_COMBINED_PLOTS <- TRUE`
+and an older plate roster; that flag is now `FALSE`, so those figures are not
+re-measurable from the current log and have been removed rather than carried
+forward.
 
 The gene intersection is *larger* here despite the same filter rule: more cells
 per plate means more genes clear `rowSums >= 10`.
@@ -762,7 +882,7 @@ script prints this every run and hard-errors if a panel named in
 | `Endocrine_islet` | 12 | 12/12 | `Chga`, `Chgb`, `Scg2`, `Scg5`, `Ins1`, `Ins2`, `Gcg`, `Sst`, `Ppy`, `Pcsk1n`, `Resp18`, `Pcsk2` |
 | `Acinar_ductal` | 9 | 8/9 | `Cela1`, `Ctrb1`, `Prss2`, `Cpa1`, `Amy2a5`, `Krt19`, `Krt18`, `Sox9`, `Spp1` |
 
-`Acinar_ductal` sits at 8/9 because **`Cpa1` has zero counts across all 454
+`Acinar_ductal` sits at 8/9 because **`Cpa1` has zero counts across all 514
 cells**, so z-scoring produces `NaN` and it is dropped. The gene is present in
 the count matrix and the annotation — it is simply not expressed in this sort,
 which is unsurprising for islet preparations with little exocrine carryover.
@@ -770,10 +890,21 @@ which is unsurprising for islet preparations with little exocrine carryover.
 That is a harmless shortfall, but it is exactly the kind of thing to check
 before trusting a call: a panel silently shrinking is how the `nf_expr` bug
 above went unnoticed. Several acinar markers are near-absent here — `Amy2a5`
-in 2 of 454 cells, `Prss2` in 3, `Ctrb1` in 10 — so the `Acinar_ductal` label
-rests largely on `Krt18` (152 cells) and `Spp1` (105), both of which are broader
-than the exocrine compartment. **Treat the 22 acinar/ductal calls with more
+in 4 of 514 cells, `Prss2` in 4, `Ctrb1` in 10 — so the `Acinar_ductal` label
+rests largely on `Krt18` (166 cells) and `Spp1` (110), both of which are broader
+than the exocrine compartment. **Treat the 24 acinar/ductal calls with more
 caution than the endothelial or hematopoietic ones.**
+
+Current per-cell type calls (514 cells):
+
+| Cell type | n |
+|---|---|
+| `Endocrine_islet` | 171 |
+| `Endothelial` | 164 |
+| `Hematopoietic` | 117 |
+| `Fibroblast` | **27** |
+| `Acinar_ductal` | 24 |
+| `Pericyte_SMC` | 11 |
 
 Panels are deliberately **non-overlapping** — verified: all 59 markers are
 unique, no gene appears in two panels, because a shared marker would make the
@@ -825,7 +956,10 @@ runtime, and the per-cell typing supersedes it.
 / `meta`), writes only to `results/05_dge/NoMHCIIFilter/`, and assigns nothing
 any earlier section reads. Verified: adding it left every prior figure identical
 — 8,948 common genes, 351 combined cells, 3 combined clusters, Clarke VAF 50 /
-VRC 46, 4 merged clusters, all unchanged.
+VRC 46, 4 merged clusters, all unchanged. *(Those figures are the state of the
+6-plate roster on which the check was run; they are a record of the check, not
+current counts. The additivity property they verify is structural and still
+holds.)*
 
 #### Why the depth floor is not optional here
 
@@ -833,11 +967,13 @@ Removing the MHCII filter also removes the depth screen it was incidentally
 performing. Running with no floor at all (`NOFILT_MIN_GENES <- 0`) was tried
 first and produced two concrete failures:
 
-1. **A pure artifact cluster.** All 564 cells gave **6** clusters, and cluster 6
-   (n=29) sat alone at UMAP1 ≈ 17, far off the main manifold — shallow cells
-   clustering by library size rather than by biology. The shallowest cell in the
-   dataset detects **51 genes on 101 reads**. With the floor applied the island
-   disappears and the structure resolves to 3 clean clusters.
+1. **A pure artifact cluster.** All 564 cells (the roster at the time) gave
+   **6** clusters, and cluster 6 (n=29) sat alone at UMAP1 ≈ 17, far off the main
+   manifold — shallow cells clustering by library size rather than by biology.
+   The shallowest cell in the dataset detects **51 genes on 101 reads**. With the
+   floor applied the island disappears and the structure resolves cleanly. This
+   experiment has not been repeated on the current 7-plate roster; the floor has
+   been left on since.
 2. **Collapsed size factors.** The per-plate estimator uses genes nonzero in
    *every* reference well, so a single near-empty reference well guts it. With
    no floor: B6G7 251 genes, NODPDL1 41, NODCD31 21, NOD 18, B6MHCIIGFP **4**,
@@ -852,10 +988,10 @@ first and produced two concrete failures:
 > filtered analyses are unaffected — they retain more reference wells because
 > the MHCII filter removed the shallow ones for different reasons.
 
-### CombinedwithVAFPaperPlots analysis
+### Combined analysis
 
 Merges your MHCII-filtered VST data with Clarke et al. 2025 mouse cells
-(GSE292898, 118/188 cells passing MHCII filter). Clarke cells are processed
+(GSE292898, 147/188 cells passing the MHCII gate). Clarke cells are processed
 through independent DESeq2 VST then **limma batch correction**
 (`removeBatchEffect`) is applied to the merged matrix before embedding.
 Clarke cells are labeled as `Clarke2025 CD45pos`, `Clarke2025 VAF`, or
@@ -864,54 +1000,70 @@ merged dataset. The other 5 output folders are completely unaffected.
 
 ---
 
-## DonsPaper — the Clarke/Don data on its own
+## ClarkeOnly — the Clarke/Don data on its own
 
-`results/05_dge/DonsPaper/` analyses GSE292898 **alone**: no cells of yours, no
-MHCII filter, no cross-plate gene intersection, no VAF/VRC reconstruction, no
+`results/05_dge/ClarkeOnly/` analyses GSE292898 **alone**: no cells of yours, no
+cross-plate gene intersection, no k-means VAF/VRC reconstruction, no
 batch correction (single dataset). It also works in Clarke's own gene-symbol
 space rather than mapping through your Ensembl IDs, because mapping first would
 silently drop genes absent from your plates.
 
 Outputs: UMAP by Leiden cluster, UMAP by published sort gate, cluster marker
-heatmap, marker workbook, and violins of `DONS_GENES`
+heatmap, marker workbook, and violins of `CLARKE_VIOLIN_GENES`
 (`Ptprc`, `Col1a1`, `Col1a2`, `Pecam1`) per cluster with per-cluster detection
 counts on the axis labels.
 
+### It is the source of the VAF/VRC reference
+
+ClarkeOnly is **not a side-analysis**. Its three cluster centroids are what the
+Combined analysis correlates every cluster against (see
+[VAF/VRC correlation](#vafvrc-correlation-clarke-et-al-2025-gse292898)). It runs
+*before* the Combined block for exactly that reason.
+
+This is why it is **not frozen to a fixed resolution**: it is clustered by the
+same auto-selected procedure as everything else. Pinning it to a hand-picked
+resolution that reproduces the paper, then using those centroids as the
+yardstick for your own cells, would be circular — it would guarantee the
+reference matched the paper's description regardless of what the data said.
+
 ### Reproducing the paper's 3 clusters
 
-The paper reports **3 clusters**: fibroblastic (green), vascular (blue), and
-CD45+ (purple), from **142** retained cells. Our default settings give **2**.
-The difference is entirely **filtering**, not clustering — and applying their
-filters reproduces their result exactly:
+The paper reports **3 clusters** — fibroblastic (green), vascular (blue), CD45+
+(purple) — from **142** retained cells. **The pipeline's defaults now reproduce
+this**, after the MHC-II gate was corrected to match Clarke's criterion:
 
-| | This pipeline's default | Clarke et al. |
+| | This pipeline | Clarke et al. |
 |---|---|---|
+| MHC-II | **required**, either chain ≥1 count | **required** ("only cells with MHC class II transcript") |
 | Cell filter | ≥500 **genes detected** | ≥1000 **total counts** |
-| MHC-II | none in DonsPaper | **required** ("only cells with MHC class II transcript") |
 | Normalisation | DESeq2 VST | Seurat `LogNormalize` + scale |
-| Clustering | Leiden on 80%-variance PCs | Seurat/Louvain on ~20 PCs |
-| Cells retained | 160 | **142** |
+| Clustering | Leiden on 80%-variance PCs (auto-selected) | Seurat/Louvain on ~20 PCs |
+| **Cells retained** | **141** | **142** |
+| **Clusters** | **3** | **3** |
 
-Applying `total counts >= 1000` AND `any MHC-II transcript` yields **exactly
-142 cells** and 3 clusters, stable across resolutions 0.3–0.8:
+188 cells → 147 pass the MHC-II gate → **141** clear the ≥500-gene depth floor.
+Clustering on 20,326 genes resolves 3 clusters with no tuning:
 
-| Cluster | n | CD45pos | Ptprc | Pecam1 | Col1a1 | = paper's |
-|---|---|---|---|---|---|---|
-| 1 | 33 | 18/22 | 31/33 (94%) | 10/33 | 1/33 | CD45+ (purple) |
-| 2 | 51 | 4 | 7/51 | 23/51 | 7/51 | fibroblastic (green) |
-| 3 | 58 | 0 | 3/58 | 56/58 (97%) | 0/58 | vascular (blue) |
+| Cluster | n | Sort gate (neg/pos) | Top marker | `Ptprc` | `Pecam1` | `Col1a1` | Label |
+|---|---|---|---|---|---|---|---|
+| 1 | 37 | 19 / 18 | `Ctss` | **30/37** | 13/37 | 2/37 | CD45pos (purple) |
+| 2 | 45 | 41 / 4 | `Pcsk2` | 7/45 | 20/45 | 5/45 | "VAF" (green) |
+| 3 | 59 | 59 / 0 | `Plvap` | 4/59 | **56/59** | 1/59 | VRC (blue) |
 
-The MHC-II transcript requirement is doing most of the work: it removes 22 cells
-that otherwise blur the CD45+/fibroblastic boundary.
+Clusters 1 and 3 are unambiguous — `Ptprc` in 81% of cluster 1, `Pecam1` in 95%
+of cluster 3, and cluster 3 contains **zero** CD45+ sorted cells.
 
-> **Note even their fibroblastic cluster is collagen-sparse** — `Col1a1` in 7 of
-> 51 cells (14%), `Pecam1` in 23 of 51 (45%). The label reflects relative
-> enrichment, not most cells being collagen-positive.
+> **Cluster 2 is not fibroblastic, whatever the paper calls it.** Its top marker
+> is `Pcsk2` (endocrine), `Col1a1` appears in 5 of 45 cells (11%), and `Pecam1`
+> (20/45) is *more* common than any collagen gene. The label reflects "neither
+> immune nor clearly endothelial", not collagen positivity. This is the same
+> population the VAF reference is built from — see the warning box above.
 
 > **Deposit/paper discrepancy.** The paper states 114 CD45− and 50 CD45+ cells
 > sorted (98 + 44 analysed). The GEO deposit contains **164 CD45neg and 24
-> CD45pos**. Their filters recover the right *total* (142) but a different split
-> (120 + 22). The deposit's composition does not match the figure's description.
+> CD45pos**. We recover nearly the right *total* (141 vs 142) but a different
+> split. The deposit's composition does not match the figure's description, and
+> this is a property of the deposit, not of the filtering.
 
 ---
 
@@ -923,8 +1075,9 @@ as the batch** to the merged and NoMHCIIFilter embeddings.
 **Why it is needed.** Size factors are estimated from each plate's *own*
 reference wells, so every plate is scaled to a different baseline and the
 normalisation itself imposes a plate-specific offset. Measured on the CD45+
-reference cells — nominally the same population on 6 plates, so any separation
-between them is technical:
+reference cells — nominally the same population across plates, so any separation
+between them is technical (measured on the 6-plate roster; the correction itself
+now spans 8 batches including Clarke2025):
 
 | | Raw log-CPM | Per-plate VST (what clustering consumes) | After correction |
 |---|---|---|---|
@@ -966,24 +1119,30 @@ matrix. Constant genes are held out and re-attached unchanged.
 
 ## Which analyses run
 
-`scripts/per_strain_plots.R` has four switches near the top. Turning the first
-two off takes a full run from **~15 min to 11 min 25 s** (measured, clean run,
-all six plates).
-
-That is a real but modest win, and worth being clear about why: most of the
-remaining time is work the flags *cannot* skip — the six per-plate DESeq2/VST
-fits are mandatory (see the dependency table below), and the Wilcoxon loops in
-the two enabled folders are themselves expensive (NoMHCIIFilter cluster 1 alone
-tests ~9,500 candidate genes, and the merged pairwise contrasts run six
-two-sided comparisons over ~7,800 genes). Getting substantially below this
-needs caching the per-plate VST matrices to disk, not more flags.
+`scripts/per_strain_plots.R` has five switches near the top:
 
 ```r
 RUN_PER_STRAIN_PLOTS <- FALSE   # results/05_dge/<STRAIN>_plots/
 RUN_COMBINED_PLOTS   <- FALSE   # results/05_dge/combined_plots/
-RUN_VAF_MERGED       <- TRUE    # results/05_dge/CombinedwithVAFPaperPlots/
+RUN_CLARKEONLY       <- TRUE    # results/05_dge/ClarkeOnly/   (runs FIRST)
+RUN_VAF_MERGED       <- TRUE    # results/05_dge/Combined/
 RUN_NOMHCIIFILTER    <- TRUE    # results/05_dge/NoMHCIIFilter/
 ```
+
+Turning the first two off is a real but modest win, and it is worth being clear
+about why: most of the remaining time is work the flags *cannot* skip — the
+seven per-plate DESeq2/VST fits are mandatory (see the dependency table below),
+and the Wilcoxon loops in the enabled folders are themselves expensive (the
+merged pairwise contrasts run eight two-sided comparisons over ~10,200 genes).
+Getting substantially below this needs caching the per-plate VST matrices to
+disk, not more flags.
+
+> **`RUN_CLARKEONLY` is not independent of `RUN_VAF_MERGED`.** ClarkeOnly builds
+> the VAF/VRC/CD45pos reference profiles that Combined correlates against, which
+> is why it runs first. Switching it off does not just drop a folder — it
+> silently downgrades Combined to the legacy k-means reference, on a different
+> scale (log1p(CPM) rather than VST). The log says so loudly when this happens;
+> the workbook's Notes sheet records which reference was actually used.
 
 Nothing is deleted — flip a flag back to `TRUE` to restore that output exactly
 as before.
@@ -995,7 +1154,7 @@ as before.
 >
 > | Still runs | Why |
 > |---|---|
-> | The per-strain DESeq2/VST loop | Builds `all_expr_list` / `all_meta_list` → `combined_expr` + `combined_meta`, which CombinedwithVAFPaperPlots consumes. Only the loop's plots and spreadsheets are skipped, never its arithmetic. |
+> | The per-strain DESeq2/VST loop | Builds `all_expr_list` / `all_meta_list` → `combined_expr` + `combined_meta`, which Combined consumes. Only the loop's plots and spreadsheets are skipped, never its arithmetic. |
 > | `combined_meta$strain_condition` | The merged metadata is built from it |
 > | `strain_base_colors`, `sc_palette` | The merged UMAP and bar charts extend these palettes |
 > | `MIN_LABEL_PROP` | Used by the merged bar charts |
@@ -1014,7 +1173,10 @@ as before.
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `MHCII_VST_MIN` | 1.0 | Minimum VST for MHCII filter |
+| `MHCII_GENES` | H2-Aa, H2-Ab1 | MHC-II chains the gate tests |
+| `MHCII_MIN_COUNT` | 1 | Raw counts for a chain to count as detected |
+| `MHCII_REQUIRE_N` | 1 | Chains required: 1 = either (Clarke), 2 = both |
+| `MHCII_BYPASS_SORTED_NEG` | TRUE | Cells sorted MHCII-negative skip the gate entirely |
 | `N_HVG` | 2000 | HVGs for UMAP PCA |
 | `VAR_THRESHOLD` | 0.80 | Cumulative variance for PC selection |
 | `UMAP_N_NEIGHBORS` | 15 | UMAP neighborhood size |
@@ -1037,8 +1199,9 @@ as before.
 | `BATCH_CORRECT_BY_PLATE` | TRUE | Per-plate `removeBatchEffect` on the merged and NoMHCIIFilter embeddings |
 | `MIN_CORR_R` | 0.50 | VAF/VRC: minimum winning Pearson r before a call is reported |
 | `MIN_CORR_MARGIN` | 0.05 | VAF/VRC: minimum gap to the runner-up before a call is reported |
-| `RUN_DONSPAPER` | TRUE | `results/05_dge/DonsPaper/` — Clarke data analysed alone |
-| `DONS_GENES` | Ptprc, Col1a1, Col1a2, Pecam1 | Genes given a per-cluster violin in DonsPaper |
+| `RUN_CLARKEONLY` | TRUE | `results/05_dge/ClarkeOnly/` — Clarke data analysed alone. **Also builds the VAF/VRC reference the Combined analysis uses**, so switching it off silently downgrades Combined to the legacy k-means reference |
+| `CLARKE_LEIDEN_RESOLUTION` | 1.0 | Leiden granularity for ClarkeOnly only; `LEIDEN_RESOLUTION` governs everything else |
+| `CLARKE_VIOLIN_GENES` | Ptprc, Col1a1, Col1a2, Pecam1 | Genes given a per-cluster violin in ClarkeOnly |
 | `NF_VIOLIN_GENES` | c("Ciita", "Nod2") | Legacy cluster-violin path only |
 
 `VIOLIN_GENES` is defined in the config block at the top of
