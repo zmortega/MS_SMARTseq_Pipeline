@@ -105,11 +105,32 @@ VIOLIN_GENES <- c(
 )
 
 # -- MHCII expression filter ---------------------------------------------------
-# Cells must express BOTH H2-Aa AND H2-Ab above this VST threshold to be
-# included in DESeq2 models, UMAPs, clustering, and all downstream analyses.
-# VST scale is log-like; 1.0 = very low but detectable expression.
-MHCII_VST_MIN    <- 1.0    # minimum VST for both H2-Aa and H2-Ab
+# Decides which cells enter DESeq2 models, UMAPs, clustering, and every
+# downstream analysis. The test is presence/absence on RAW COUNTS -- no
+# normalisation is involved, because "is the transcript there" does not need a
+# scale. See MHCII_MIN_COUNT / MHCII_REQUIRE_N below for the actual thresholds.
 MHCII_GENES      <- c("H2-Aa", "H2-Ab1")  # gene symbols to filter on
+
+# Matches Clarke et al. 2025: "only cells with MHC class II transcript were
+# included in analysis" -- presence/absence in EITHER chain, not a quantitative
+# floor in both.
+#
+# WHAT THIS REPLACED, AND WHY IT MATTERED: the filter used to require BOTH genes
+# at log1p(CPM) >= log1p(5) -- stricter than Clarke on two independent axes (AND
+# vs OR, CPM>=5 vs >=1 count), discarding 191 of 660 cells the paper's own
+# criterion retains. Worse, the constant that appeared to control it,
+# MHCII_VST_MIN <- 1.0, was never read by the filter: the real threshold was a
+# separate hardcoded log1p(5) while the console printed "VST 1". Tuning the
+# visible knob did nothing and gave no sign of it. These three constants are now
+# the only thing the filter consults.
+MHCII_MIN_COUNT  <- 1      # raw counts needed to call a chain "detected"
+MHCII_REQUIRE_N  <- 1      # chains that must be detected: 1 = either (Clarke), 2 = both
+
+# Cells whose SORT GATE was MHCII-negative skip this gate entirely. It exists to
+# confirm that MHCII-POSITIVE sorted cells really express it; applying it to
+# cells deliberately sorted MHCII-negative tests them against the opposite of
+# their own gate and silently deletes the population.
+MHCII_BYPASS_SORTED_NEG <- TRUE
 
 # -- Depth floor for the NoMHCIIFilter analysis --------------------------------
 # Applies ONLY to the NoMHCIIFilter section at the end of this script. Every
@@ -324,7 +345,7 @@ summarise_best_match <- function(cl_label, df) {
 #
 # WHAT STILL RUNS REGARDLESS, because later sections depend on it:
 #   - the per-strain DESeq2/VST loop, which builds all_expr_list/all_meta_list
-#     -> combined_expr + combined_meta, which CombinedwithVAFPaperPlots consumes.
+#     -> combined_expr + combined_meta, which Combined consumes.
 #     Only that loop's PLOTS and spreadsheets are skipped, not its arithmetic.
 #   - combined_expr / combined_meta / strain_condition (merged needs all three)
 #   - the CellMarker database + score_cluster (merged and NoMHCIIFilter both
@@ -339,12 +360,22 @@ MIN_LABEL_PROP <- 0.05          # only label bar segments >= 5%
 
 RUN_PER_STRAIN_PLOTS <- FALSE   # results/05_dge/<STRAIN>_plots/
 RUN_COMBINED_PLOTS   <- FALSE   # results/05_dge/combined_plots/
-RUN_VAF_MERGED       <- TRUE    # results/05_dge/CombinedwithVAFPaperPlots/
+RUN_VAF_MERGED       <- TRUE    # results/05_dge/Combined/
 RUN_NOMHCIIFILTER    <- TRUE    # results/05_dge/NoMHCIIFilter/
-RUN_DONSPAPER        <- TRUE    # results/05_dge/DonsPaper/
+RUN_CLARKEONLY        <- TRUE    # results/05_dge/ClarkeOnly/
 
-# Genes given a per-cluster violin panel in the DonsPaper analysis.
-DONS_GENES <- c("Ptprc", "Col1a1", "Col1a2", "Pecam1")
+# Genes given a per-cluster violin panel in the ClarkeOnly analysis.
+CLARKE_VIOLIN_GENES <- c("Ptprc", "Col1a1", "Col1a2", "Pecam1")
+
+# ClarkeOnly clusters at its own resolution. At the global 0.5 these cells give
+# only 2 clusters -- CD45+ and fibroblastic merge, leaving endothelium alone --
+# which cannot supply one reference profile per published population. At 1.0
+# they resolve into 3, and mean silhouette is also better there (0.066 vs 0.054),
+# so this is the better partition by that metric rather than a forced one.
+#
+# Caveat worth keeping in view: 0.066 is a low silhouette in absolute terms.
+# These three groups are real but not crisply separated in DESeq2-VST space.
+CLARKE_LEIDEN_RESOLUTION <- 1.0
 
 # -- Self-copy into scripts/ for version control -------------------------------
 # (skipped when already running from scripts/per_strain_plots.R, since
@@ -445,9 +476,9 @@ to_sym <- function(ens) {
 # Compute a quick log-normalized matrix to assess expression before DESeq2.
 # We use log1p(counts / colSums * 1e4) as a fast pre-filter proxy, then
 # confirm with VST inside each per-strain loop.
-cat("Applying MHCII expression filter (both", paste(MHCII_GENES, collapse=" & "),
-    ">= VST", MHCII_VST_MIN, ")...
-")
+cat("Applying MHCII transcript filter (Clarke et al.: >=", MHCII_REQUIRE_N, "of",
+    paste(MHCII_GENES, collapse=" / "), "detected at >=", MHCII_MIN_COUNT,
+    "count(s))\n")
 
 # Look up Ensembl IDs for H2-Aa and H2-Ab1
 sym_to_ens_map  <- setNames(names(sym_map), sym_map)
@@ -477,18 +508,21 @@ cat("  MHCII Ensembl IDs:
 for (i in seq_along(mhcii_ens)) cat("   ", names(mhcii_ens)[i], "->", mhcii_ens[i], "
 ")
 
-# Quick log-normalised proxy: log1p(CPM) — fast, no DESeq2 needed
-lib_sizes   <- colSums(counts)
-cpm_mat     <- sweep(as.matrix(counts[mhcii_ens, ]), 2, lib_sizes, "/") * 1e6
-logcpm_mat  <- log1p(cpm_mat)
-
-# A cell passes if BOTH genes are above a CPM proxy threshold.
-# We use log1p(CPM) > log1p(5) as a rough equivalent of VST > 1
-# (conservative — better to keep borderline cells and let VST decide)
-LOGCPM_PROXY <- log1p(5)
-passes <- colSums(logcpm_mat >= LOGCPM_PROXY) == 2
-# Name the mask by cell_id so every use below is by name, never by position.
+# Presence/absence on raw counts - no normalisation needed to ask "is it there".
+mhcii_detected <- as.matrix(counts[mhcii_ens, , drop=FALSE]) >= MHCII_MIN_COUNT
+passes <- colSums(mhcii_detected) >= MHCII_REQUIRE_N
 names(passes) <- colnames(counts)
+
+# meta is already reordered to colnames(counts) above, so this is positionally safe.
+sorted_mhcii_neg <- grepl("MHCIIneg", meta$condition)
+names(sorted_mhcii_neg) <- rownames(meta)
+stopifnot(identical(names(sorted_mhcii_neg), names(passes)))
+if (MHCII_BYPASS_SORTED_NEG && any(sorted_mhcii_neg)) {
+  rescued <- sorted_mhcii_neg & !passes
+  cat("  Sorted MHCII-negative cells bypassing the gate:", sum(sorted_mhcii_neg),
+      "(", sum(rescued), "of which would otherwise have been dropped )\n")
+  passes <- passes | sorted_mhcii_neg
+}
 pass_cells    <- names(passes)[passes]
 cat("  Cells passing MHCII filter:", sum(passes), "/", length(passes), "
 ")
@@ -2132,6 +2166,358 @@ run_mca_correlation(
 
 } # end RUN_COMBINED_PLOTS
 # ==============================================================================
+# Clarke reference file path (hoisted: ClarkeOnly below needs it, and so does
+# the merged analysis further down)
+# ==============================================================================
+vaf_counts_f2 <- file.path(base_dir,
+  "reference/GSE292898_teyton_don_2025_processed_mouse_raw_counts_matrix.csv.gz")
+
+
+
+# ==============================================================================
+# ClarkeOnly: the Clarke/Don GSE292898 mouse data on its own
+# ==============================================================================
+# Standalone by design. Reads the published count matrix directly and shares
+# nothing with the merged analysis: no MHCII filter, no cross-plate gene
+# intersection, no VAF/VRC reconstruction, no batch correction (it is a single
+# dataset). The point is to see what is actually in that dataset before any of
+# this pipeline's assumptions are layered onto it.
+#
+# It also works in Clarke's own gene-symbol space rather than mapping through
+# your Ensembl IDs. Mapping first would silently drop any gene absent from your
+# plates -- the same intersection leakage that broke the VAF marker panels.
+if (!RUN_CLARKEONLY) {
+  cat("\nSkipping ClarkeOnly - RUN_CLARKEONLY is FALSE\n")
+} else if (!file.exists(vaf_counts_f2)) {
+  cat("\nSkipping ClarkeOnly - Clarke count matrix not found at", vaf_counts_f2, "\n")
+} else {
+
+cat("\n==============================================================\n")
+cat("Building ClarkeOnly analysis (Clarke/Don GSE292898, standalone)...\n")
+cat("==============================================================\n")
+
+co2_dir <- file.path(dge_dir, "ClarkeOnly")
+dir.create(co2_dir, recursive=TRUE, showWarnings=FALSE)
+
+co2_raw <- read.csv(gzfile(vaf_counts_f2), row.names=1, check.names=FALSE)
+co2_cnt <- as.matrix(co2_raw[, !colnames(co2_raw) %in% c("gene_id","gene_name")])
+rownames(co2_cnt) <- co2_raw[["gene_name"]]
+storage.mode(co2_cnt) <- "numeric"
+co2_cnt <- co2_cnt[!is.na(rownames(co2_cnt)) & rownames(co2_cnt) != "", , drop=FALSE]
+co2_cnt <- co2_cnt[, colSums(co2_cnt) > 0, drop=FALSE]
+cat("Clarke matrix:", nrow(co2_cnt), "genes x", ncol(co2_cnt), "cells\n")
+
+# Sort gate is stated in the column names (e.g. A01cd45POSspMMasRS), so it is
+# read rather than inferred. The pipeline elsewhere guesses this from well
+# position; that guess happens to be right for this dataset, but reading the
+# label cannot silently drift if the layout ever changes.
+co2_gate <- ifelse(grepl("cd45POS", colnames(co2_cnt), ignore.case=TRUE),
+                    "CD45pos", "CD45neg")
+names(co2_gate) <- colnames(co2_cnt)
+cat("Sort gate (from the column names):\n"); print(table(co2_gate))
+
+# Same depth floor as NoMHCIIFilter, for the same reason: shallow cells cluster
+# by library size rather than biology.
+# Same MHCII transcript gate as our own cells, so the reference population is
+# defined the same way as the cells it will eventually be compared against.
+# Every Clarke cell was sorted MHCII-positive, so none bypass.
+co2_mh_ens <- intersect(MHCII_GENES, rownames(co2_cnt))
+if (length(co2_mh_ens) < 1) stop("ClarkeOnly: no MHC-II genes in the Clarke matrix")
+co2_mh <- colSums(co2_cnt[co2_mh_ens, , drop=FALSE] >= MHCII_MIN_COUNT) >= MHCII_REQUIRE_N
+cat("Clarke cells passing the MHCII transcript gate:", sum(co2_mh), "/", ncol(co2_cnt), "\n")
+
+co2_ng   <- colSums(co2_cnt > 0)
+co2_keep <- names(co2_ng)[co2_ng >= NOFILT_MIN_GENES & co2_mh[names(co2_ng)]]
+cat("Depth floor: >=", NOFILT_MIN_GENES, "genes detected -> keeping",
+    length(co2_keep), "of", ncol(co2_cnt), "cells\n")
+print(table(co2_gate[co2_keep]))
+co2_cnt <- co2_cnt[, co2_keep, drop=FALSE]
+co2_gate <- co2_gate[co2_keep]
+if (ncol(co2_cnt) < 10) stop("ClarkeOnly: too few cells survive the depth floor.")
+
+# Low-count gene filter, exempting the genes we are going to plot. A gene with
+# zero counts is a measurement, and dropping it here would make it unplottable
+# rather than plottable as zeros.
+co2_keep_g <- rowSums(co2_cnt) >= 10 | rownames(co2_cnt) %in% CLARKE_VIOLIN_GENES
+cat("Genes passing filter:", sum(co2_keep_g), "of", nrow(co2_cnt), "\n")
+co2_cnt <- co2_cnt[co2_keep_g, , drop=FALSE]
+
+# VST. blind=TRUE so the transformation cannot be informed by the sort gate --
+# the clustering below is meant to be unsupervised.
+co2_dds <- DESeqDataSetFromMatrix(round(co2_cnt),
+                                   data.frame(gate=factor(co2_gate),
+                                              row.names=colnames(co2_cnt)),
+                                   design = ~ 1)
+co2_dds <- estimateSizeFactors(co2_dds, type="poscounts")
+co2_expr <- assay(varianceStabilizingTransformation(co2_dds, blind=TRUE))
+cat("VST complete:", nrow(co2_expr), "genes x", ncol(co2_expr), "cells\n")
+
+# HVG -> PCA -> UMAP for layout; separate all-gene PCA -> Leiden for clusters.
+# Same construction as every other embedding in this script.
+co2_var <- apply(co2_expr, 1, var)
+co2_hvg <- names(sort(co2_var, decreasing=TRUE))[1:min(N_HVG, sum(co2_var > 0))]
+cat("HVGs selected:", length(co2_hvg), "\n")
+cat("Running PCA + UMAP...\n")
+co2_umap <- run_umap(co2_expr[co2_hvg, , drop=FALSE])
+co2_df   <- data.frame(co2_umap, cell_id=rownames(co2_umap),
+                        gate=co2_gate[rownames(co2_umap)],
+                        stringsAsFactors=FALSE)
+
+cat("Running all-gene PCA for clustering...\n")
+co2_nz   <- co2_expr[apply(co2_expr, 1, var) > 0, , drop=FALSE]
+co2_pca  <- prcomp(t(co2_nz), center=TRUE, scale.=FALSE)
+co2_cum  <- cumsum(co2_pca$sdev^2 / sum(co2_pca$sdev^2))
+co2_npc  <- max(2, which(co2_cum >= VAR_THRESHOLD)[1])
+cat("PCs selected:", co2_npc,
+    sprintf("(%.1f%% variance)\n", co2_cum[co2_npc]*100))
+co2_df$cluster <- as.character(run_leiden(co2_pca$x[, 1:co2_npc, drop=FALSE],
+                                          resolution=CLARKE_LEIDEN_RESOLUTION))
+co2_nclust <- length(unique(co2_df$cluster))
+cat("Clusters found:", co2_nclust, "\n")
+cat("Cells per cluster:\n"); print(table(co2_df$cluster))
+cat("Cluster x sort gate:\n"); print(table(co2_df$cluster, co2_df$gate))
+
+# ------------------------------------------------------------------------------
+# Name the clusters as Clarke's three populations, and build reference profiles
+# ------------------------------------------------------------------------------
+# These centroids are intended to REPLACE the k-means(k=2) VAF/VRC
+# reconstruction used elsewhere, which does not recover fibroblasts: it yields
+# 24 endocrine / 21 immune / 6 fibroblast, because k=2 on a >=4-population
+# dataset can only split endothelium from everything else.
+#
+# They are computed and written out here but NOT yet consumed by the Combined
+# analysis -- that wiring is deliberately held back until these plots have been
+# inspected.
+co2_prof <- sapply(sort(unique(co2_df$cluster)), function(k) {
+  cs <- co2_df$cell_id[co2_df$cluster == k]
+  rowMeans(co2_expr[, cs, drop=FALSE])
+})
+co2_mean <- function(g) if (g %in% rownames(co2_prof)) co2_prof[g, ] else
+                        setNames(rep(NA_real_, ncol(co2_prof)), colnames(co2_prof))
+co2_ptprc <- co2_mean("Ptprc"); co2_pecam <- co2_mean("Pecam1")
+cat("\n  mean VST per cluster:\n")
+cat("    Ptprc :", paste(sprintf("c%s=%.2f", names(co2_ptprc), co2_ptprc), collapse="  "), "\n")
+cat("    Pecam1:", paste(sprintf("c%s=%.2f", names(co2_pecam), co2_pecam), collapse="  "), "\n")
+
+# Strongest marker first: Ptprc identifies CD45+, Pecam1 identifies endothelium,
+# and the remaining cluster is the fibroblastic one Clarke calls VAF.
+co2_label <- setNames(rep(NA_character_, ncol(co2_prof)), colnames(co2_prof))
+co2_label[names(which.max(co2_ptprc))] <- "CD45pos"
+co2_rest <- names(co2_label)[is.na(co2_label)]
+co2_label[co2_rest[which.max(co2_pecam[co2_rest])]] <- "VRC"
+co2_rest <- names(co2_label)[is.na(co2_label)]
+if (length(co2_rest) == 1) {
+  co2_label[co2_rest] <- "VAF"
+} else {
+  sizes <- table(co2_df$cluster)[co2_rest]
+  co2_label[co2_rest[which.max(sizes)]] <- "VAF"
+  co2_label[is.na(co2_label)] <- paste0("other_", names(co2_label)[is.na(co2_label)])
+  cat("  *** ClarkeOnly resolved", co2_nclust,
+      "clusters, not 3. Extra cluster(s) labelled 'other_*' and excluded from the",
+      "reference profiles. The published populations are CD45+, VAF and VRC only. ***\n")
+}
+cat("  cluster -> published population:",
+    paste(sprintf("c%s=%s", names(co2_label), co2_label), collapse="  "), "\n")
+
+# Written to disk so the Combined analysis can adopt them later without
+# recomputing, and so the reference is inspectable rather than implicit.
+CLARKE_REF_PROFILES <- co2_prof[, names(co2_label)[co2_label %in% c("CD45pos","VAF","VRC")], drop=FALSE]
+colnames(CLARKE_REF_PROFILES) <- unname(co2_label[colnames(CLARKE_REF_PROFILES)])
+saveRDS(CLARKE_REF_PROFILES, file.path(co2_dir, "clarke_reference_profiles.rds"))
+write.csv(data.frame(gene=rownames(CLARKE_REF_PROFILES), CLARKE_REF_PROFILES,
+                     check.names=FALSE),
+          file.path(co2_dir, "clarke_reference_profiles.csv"), row.names=FALSE)
+cat("  reference profiles written:", paste(colnames(CLARKE_REF_PROFILES), collapse=", "),
+    "(", nrow(CLARKE_REF_PROFILES), "genes )\n")
+
+# Label the plots by population, not by arbitrary cluster number.
+co2_df$population <- paste0(co2_label[co2_df$cluster], " (c", co2_df$cluster, ")")
+
+co2_pal <- setNames(scales::hue_pal()(co2_nclust), sort(unique(co2_df$cluster)))
+
+# -- UMAPs ---------------------------------------------------------------------
+mk_umap <- function(colvar, pal, title, sub, legend) {
+  ggplot(co2_df, aes(x=UMAP1, y=UMAP2, color=.data[[colvar]])) +
+    geom_point(size=2, alpha=0.85) +
+    scale_color_manual(values=pal) +
+    labs(title=title, subtitle=sub, color=legend) +
+    theme_bw(base_size=12) +
+    theme(plot.title=element_text(face="bold", size=12),
+          plot.subtitle=element_text(size=9, color="grey40"),
+          panel.grid.minor=element_blank(), aspect.ratio=1)
+}
+co2_sub <- paste0("Clarke/Don GSE292898 mouse, standalone | n=", nrow(co2_df),
+                   " cells >= ", NOFILT_MIN_GENES, " genes\nUMAP: top ",
+                   length(co2_hvg), " HVGs | Clusters: all-gene PCA | resolution=",
+                   LEIDEN_RESOLUTION)
+ggsave(file.path(co2_dir, paste0("umap_co2_all", nrow(co2_df), "_by_cluster.pdf")),
+       mk_umap("cluster", co2_pal,
+               paste0("Clarke/Don 2025 - ", nrow(co2_df), " cells by Leiden cluster"),
+               co2_sub, "Cluster"), width=7.5, height=6)
+cat("Saved: umap_co2_all", nrow(co2_df), "_by_cluster.pdf\n", sep="")
+
+ggsave(file.path(co2_dir, "umap_clarke_by_population.pdf"),
+       mk_umap("population",
+               setNames(scales::hue_pal()(length(unique(co2_df$population))),
+                        sort(unique(co2_df$population))),
+               "Clarke/Don 2025 - by assigned population",
+               co2_sub, "Population"), width=8, height=6)
+cat("Saved: umap_clarke_by_population.pdf\n")
+
+ggsave(file.path(co2_dir, "umap_co2_by_sort_gate.pdf"),
+       mk_umap("gate", c(CD45pos="#2166AC", CD45neg="#B2182B"),
+               "Clarke/Don 2025 - by published sort gate", co2_sub, "Sort gate"),
+       width=7.5, height=6)
+cat("Saved: umap_co2_by_sort_gate.pdf\n")
+
+# -- Cluster marker genes + heatmap --------------------------------------------
+cat("\nRunning Wilcoxon marker analysis (one-vs-rest)...\n")
+co2_cv <- setNames(co2_df$cluster, co2_df$cell_id)
+co2_markers <- list()
+for (cl in sort(unique(co2_cv))) {
+  ins  <- names(co2_cv)[co2_cv == cl]; outs <- names(co2_cv)[co2_cv != cl]
+  if (length(ins) < 3 || length(outs) < 3) {
+    cat("  Cluster", cl, "- too few cells, skipped\n"); next
+  }
+  l2 <- rowMeans(co2_expr[, ins, drop=FALSE]) -
+        rowMeans(co2_expr[, outs, drop=FALSE])
+  cand <- names(l2)[l2 >= MIN_LOG2FC]
+  cat("  Cluster", cl, "(n=", length(ins), "): ", length(cand), " candidates\n", sep="")
+  if (!length(cand)) { co2_markers[[cl]] <- data.frame(); next }
+  pv <- sapply(cand, function(g)
+          wilcox.test(co2_expr[g, ins], co2_expr[g, outs],
+                      alternative="greater", exact=FALSE)$p.value)
+  co2_markers[[cl]] <- data.frame(gene=cand, log2FC=round(l2[cand],4),
+                                   padj=signif(p.adjust(pv, "BH"),4),
+                                   stringsAsFactors=FALSE) %>%
+    filter(padj < MAX_PADJ) %>% arrange(desc(log2FC)) %>%
+    distinct(gene, .keep_all=TRUE)
+  cat("    significant:", nrow(co2_markers[[cl]]),
+      "| top:", if (nrow(co2_markers[[cl]])) co2_markers[[cl]]$gene[1] else "none", "\n")
+}
+
+co2_hm <- c()
+for (cl in names(co2_markers))
+  if (nrow(co2_markers[[cl]]))
+    co2_hm <- c(co2_hm, head(setdiff(co2_markers[[cl]]$gene, co2_hm), TOP_HEATMAP))
+cat("Heatmap genes:", length(co2_hm), "\n")
+
+if (length(co2_hm) >= 2) {
+  ord  <- co2_df$cell_id[order(as.integer(co2_df$cluster))]
+  z    <- t(scale(t(co2_expr[co2_hm, ord, drop=FALSE])))
+  z[z >  2.5] <-  2.5; z[z < -2.5] <- -2.5
+  z    <- z[rowSums(is.na(z)) == 0, , drop=FALSE]
+  ha   <- HeatmapAnnotation(
+            Cluster = co2_df$cluster[match(ord, co2_df$cell_id)],
+            Gate    = co2_df$gate[match(ord, co2_df$cell_id)],
+            col     = list(Cluster = co2_pal,
+                           Gate    = c(CD45pos="#2166AC", CD45neg="#B2182B")),
+            annotation_name_side="left")
+  ht <- Heatmap(z, name="Z-score",
+                col=colorRamp2(c(-2.5,0,2.5), c("#3D0751","#1A1A1A","#F5E642")),
+                top_annotation=ha, show_column_names=FALSE, show_row_names=TRUE,
+                row_names_gp=gpar(fontsize=7, fontface="italic"),
+                cluster_rows=FALSE, cluster_columns=FALSE, row_title=NULL,
+                column_title=paste0("Clarke/Don cluster markers - ", nrow(z),
+                                    " genes x ", ncol(z), " cells"),
+                column_title_gp=gpar(fontsize=12, fontface="bold"),
+                heatmap_legend_param=list(title="Z-score\n(VST)",
+                                          legend_height=unit(3,"cm")),
+                use_raster=TRUE, raster_quality=5, raster_device=HT_RASTER_DEVICE)
+  pdf(file.path(co2_dir, "heatmap_cluster_markers.pdf"),
+      width=16, height=max(8, nrow(z)*0.18+3))
+  draw(ht, heatmap_legend_side="right", annotation_legend_side="bottom")
+  dev.off()
+  cat("Saved: heatmap_cluster_markers.pdf\n")
+} else cat("Too few marker genes for a heatmap - skipped\n")
+
+# -- Violins for the requested genes -------------------------------------------
+cat("\nGenerating violin plots for", paste(CLARKE_VIOLIN_GENES, collapse=", "), "...\n")
+co2_lib <- pmax(colSums(co2_cnt), 1)
+co2_have <- intersect(CLARKE_VIOLIN_GENES, rownames(co2_expr))
+if (length(setdiff(CLARKE_VIOLIN_GENES, co2_have)))
+  cat("  not in the matrix:", paste(setdiff(CLARKE_VIOLIN_GENES, co2_have), collapse=", "), "\n")
+
+if (length(co2_have)) {
+  vp <- lapply(co2_have, function(g) {
+    d <- data.frame(cluster=factor(co2_df$cluster,
+                                   levels=sort(unique(as.integer(co2_df$cluster)))),
+                    VST=co2_expr[g, co2_df$cell_id],
+                    det=co2_cnt[g, co2_df$cell_id] > 0)
+    # Detection per cluster on the axis: VST is compressive, so a gene that is
+    # off in most cells piles up at the floor and the shape alone cannot
+    # distinguish "absent" from "present in a minority".
+    lab <- sapply(levels(d$cluster), function(k) {
+      dd <- d[d$cluster == k, ]
+      sprintf("%s\nn=%d, %d det (%.0f%%)", k, nrow(dd), sum(dd$det), 100*mean(dd$det))
+    })
+    ggplot(d, aes(x=cluster, y=VST, fill=cluster)) +
+      geom_violin(trim=TRUE, scale="width", alpha=0.85, linewidth=0.3) +
+      geom_jitter(width=0.15, size=0.9, alpha=0.5, color="grey15") +
+      scale_fill_manual(values=co2_pal) + scale_x_discrete(labels=lab) +
+      labs(title=g, subtitle=sprintf("detected in %d/%d cells overall",
+                                     sum(d$det), nrow(d)),
+           x="Leiden cluster", y="VST expression") +
+      theme_bw(base_size=11) +
+      theme(plot.title=element_text(face="bold.italic", size=12),
+            plot.subtitle=element_text(size=8, color="grey40"),
+            legend.position="none", panel.grid.minor=element_blank())
+  })
+  panel <- wrap_plots(vp, ncol=2) +
+    plot_annotation(title="Clarke/Don 2025 - marker expression by cluster",
+                    subtitle=co2_sub,
+                    theme=theme(plot.title=element_text(face="bold", size=13),
+                                plot.subtitle=element_text(size=9, color="grey40")))
+  ggsave(file.path(co2_dir, "violin_markers_by_cluster.pdf"), panel,
+         width=11, height=5*ceiling(length(vp)/2))
+  cat("Saved: violin_markers_by_cluster.pdf\n")
+
+  cat("\n  Detection by cluster:\n")
+  for (g in co2_have) {
+    cat("   ", g, ":", paste(sapply(sort(unique(co2_df$cluster)), function(k) {
+      cs <- co2_df$cell_id[co2_df$cluster == k]
+      sprintf("c%s %d/%d", k, sum(co2_cnt[g, cs] > 0), length(cs))
+    }), collapse="  "), "\n")
+  }
+}
+
+# -- Marker workbook -----------------------------------------------------------
+wb_d <- createWorkbook()
+summ <- do.call(rbind, lapply(names(co2_markers), function(cl) data.frame(
+  cluster=cl, n_cells=sum(co2_cv==cl),
+  n_CD45pos=sum(co2_gate[names(co2_cv)[co2_cv==cl]]=="CD45pos"),
+  n_CD45neg=sum(co2_gate[names(co2_cv)[co2_cv==cl]]=="CD45neg"),
+  n_markers=nrow(co2_markers[[cl]]),
+  top_markers=paste(head(co2_markers[[cl]]$gene,10), collapse=", "),
+  stringsAsFactors=FALSE)))
+addWorksheet(wb_d, "Summary"); writeData(wb_d, "Summary", summ)
+setColWidths(wb_d, "Summary", cols=1:6, widths=c(9,9,11,11,11,70))
+for (cl in names(co2_markers)) {
+  if (!nrow(co2_markers[[cl]])) next
+  sn <- paste0("Cluster_", cl)
+  addWorksheet(wb_d, sn); writeData(wb_d, sn, head(co2_markers[[cl]], TOP_EXCEL))
+  setColWidths(wb_d, sn, cols=1:3, widths=c(16,12,12))
+}
+addWorksheet(wb_d, "Notes")
+writeData(wb_d, "Notes", data.frame(Note=c(
+  "Clarke/Don GSE292898 mouse data analysed ALONE - none of your cells are included.",
+  "No MHCII filter, no cross-plate gene intersection, no batch correction (single dataset).",
+  paste0("Depth floor: >= ", NOFILT_MIN_GENES, " genes detected per cell."),
+  "Sort gate is read from the published column names (cd45POS / cd45NEG), not inferred from well position.",
+  "VST is blind=TRUE, so the transformation is not informed by the sort gate; clustering is unsupervised.",
+  "No VAF/VRC labels are applied here. GSE292898 ships no cell-type annotation - the 'cell type' column is empty for all samples - so any VAF/VRC split elsewhere in this pipeline is reconstructed, not published.",
+  "Cluster IDs are re-derived every run and are not comparable across runs."),
+  stringsAsFactors=FALSE))
+setColWidths(wb_d, "Notes", cols=1, widths=125)
+saveWorkbook(wb_d, file.path(co2_dir, "cluster_marker_genes.xlsx"), overwrite=TRUE)
+cat("Saved: cluster_marker_genes.xlsx\n")
+
+cat("\nClarkeOnly complete. Files:\n")
+for (f in list.files(co2_dir)) cat(" -", f, "\n")
+
+} # end ClarkeOnly
+
+# ==============================================================================
 # VAF / VRC correlation: compare clusters to Clarke et al. 2025 (GSE292898)
 # ==============================================================================
 cat("\nRunning VAF/VRC correlation analysis (Clarke et al. 2025)...\n")
@@ -2267,11 +2653,49 @@ if (!file.exists(vaf_counts_f)) {
   logcpm_pos   <- log1p(sweep(vaf_pos_mat, 2, lib_pos, "/") * 1e6)
   mean_cd45pos_ref <- rowMeans(logcpm_pos)
 
-  ref_profiles <- list(
-    VAF    = mean_vaf_ref,
-    VRC    = mean_vrc_ref,
-    CD45pos = mean_cd45pos_ref
-  )
+  # -- Which reference profiles to correlate against ---------------------------
+  # PREFERRED: the ClarkeOnly cluster centroids computed above. Those come from
+  # actually clustering Clarke's cells (3 clusters, one per published
+  # population) under this pipeline's own filters, normalisation and VST -- the
+  # same treatment the clusters being scored received.
+  #
+  # The k-means(k=2) reconstruction below it is the historical fallback and
+  # should not be trusted: k=2 on a dataset containing at least four
+  # populations can only split endothelium from everything else, so its "VAF"
+  # comes out 24 endocrine / 21 immune / 6 fibroblast. It is retained only so
+  # the correlation still runs if ClarkeOnly is switched off.
+  #
+  # NOTE the two are on different scales: the ClarkeOnly centroids are VST
+  # (matching merged_expr, which is what gets scored), the fallback is
+  # log1p(CPM) from raw counts. Numbers are not comparable between them.
+  if (exists("CLARKE_REF_PROFILES") && ncol(CLARKE_REF_PROFILES) == 3) {
+    ref_profiles <- lapply(colnames(CLARKE_REF_PROFILES),
+                           function(k) CLARKE_REF_PROFILES[, k])
+    names(ref_profiles) <- colnames(CLARKE_REF_PROFILES)
+    cat("  Reference profiles: ClarkeOnly cluster centroids (VST, ",
+        nrow(CLARKE_REF_PROFILES), " genes )\n", sep="")
+    REF_SOURCE_NOTE <- paste0(
+      "VAF / VRC / CD45pos here are the ClarkeOnly cluster centroids: the Clarke ",
+      "cells were re-clustered on their own by this same pipeline (Leiden, ",
+      "resolution ", CLARKE_LEIDEN_RESOLUTION, "), the 3 resulting clusters were ",
+      "labelled by marker expression (highest Ptprc -> CD45pos, then highest ",
+      "Pecam1 -> VRC, remainder -> VAF), and their mean VST profiles (",
+      nrow(CLARKE_REF_PROFILES), " genes) are used as the reference.")
+  } else {
+    ref_profiles <- list(
+      VAF    = mean_vaf_ref,
+      VRC    = mean_vrc_ref,
+      CD45pos = mean_cd45pos_ref
+    )
+    cat("  *** Reference profiles: legacy k-means(k=2) reconstruction.",
+        "ClarkeOnly did not supply 3 centroids. Its 'VAF' is predominantly",
+        "endocrine and should not be read as fibroblast. ***\n")
+    REF_SOURCE_NOTE <- paste0(
+      "FALLBACK REFERENCE IN USE: ClarkeOnly did not supply 3 centroids, so VAF ",
+      "and VRC here are RECONSTRUCTED by k-means (k=2) on the Clarke CD45- cells. ",
+      "These are log1p(CPM) profiles, not VST, so the r values are not comparable ",
+      "to a ClarkeOnly-referenced run.")
+  }
 
 if (RUN_COMBINED_PLOTS) {
   # -- Compute correlations for each of your Leiden clusters ------------------
@@ -2637,23 +3061,22 @@ cat("   - heatmap_cluster_markers.pdf\n")
 cat("==============================================================\n")
 
 # ==============================================================================
-# CombinedwithVAFPaperPlots: merge your cells with Clarke et al. 2025 mouse data
+# Combined: merge your cells with Clarke et al. 2025 mouse data
 # ==============================================================================
 cat("\n==============================================================\n")
-cat("Building CombinedwithVAFPaperPlots analysis...\n")
+cat("Building Combined analysis...\n")
 cat("==============================================================\n")
 
-vaf_counts_f2 <- file.path(base_dir,
-  "reference/GSE292898_teyton_don_2025_processed_mouse_raw_counts_matrix.csv.gz")
+# (vaf_counts_f2 is now defined once, above the ClarkeOnly block)
 
 if (!RUN_VAF_MERGED) {
-  cat("Skipping CombinedwithVAFPaperPlots - RUN_VAF_MERGED is FALSE\n")
+  cat("Skipping Combined - RUN_VAF_MERGED is FALSE\n")
 } else if (!file.exists(vaf_counts_f2)) {
   cat("WARNING: Clarke et al. count matrix not found. Skipping merged analysis.\n")
   cat("Place file at:", vaf_counts_f2, "\n")
 } else {
 
-  vaf_out_dir <- file.path(dge_dir, "CombinedwithVAFPaperPlots")
+  vaf_out_dir <- file.path(dge_dir, "Combined")
   dir.create(vaf_out_dir, showWarnings=FALSE, recursive=TRUE)
 
   # -- Load Clarke counts ------------------------------------------------------
@@ -2692,8 +3115,10 @@ if (!RUN_VAF_MERGED) {
     lib_c       <- colSums(vaf_cnt_sub)
     cpm_c       <- sweep(vaf_cnt_sub, 2, pmax(lib_c, 1), "/") * 1e6
     logcpm_c    <- log1p(cpm_c)
-    passes_c    <- colSums(logcpm_c[mhcii_ens_clarke, , drop=FALSE] >=
-                             log1p(5)) == 2
+    # Same rule as our cells, so both sides of the merge are gated identically.
+    # Every Clarke cell was sorted MHCII-positive, so none bypass.
+    passes_c    <- colSums(vaf_cnt_sub[mhcii_ens_clarke, , drop=FALSE] >=
+                             MHCII_MIN_COUNT) >= MHCII_REQUIRE_N
     vaf_cnt_sub <- vaf_cnt_sub[, passes_c, drop=FALSE]
     cat("Clarke cells passing MHCII filter:", ncol(vaf_cnt_sub), "/",
         sum(!is.na(passes_c)), "\n")
@@ -2929,6 +3354,14 @@ if (!RUN_VAF_MERGED) {
   cluster_pal_m <- setNames(scales::hue_pal()(n_clust_m),
                               sort(unique(as.character(umap_m_df$cluster))))
   cluster_vec_m <- setNames(as.character(umap_m_df$cluster), umap_m_df$cell_id)
+
+  # Per-cell coordinates + annotation. Without this the UMAP is a picture you
+  # cannot interrogate: asking "which sample are those outlying points from?"
+  # otherwise means re-running the whole script.
+  write.csv(umap_m_df[, c("cell_id","UMAP1","UMAP2","cluster","strain",
+                          "strain_group","condition","strain_condition")],
+            file.path(vaf_out_dir, "umap_coordinates_by_cell.csv"), row.names=FALSE)
+  cat("Saved: umap_coordinates_by_cell.csv (", nrow(umap_m_df), "cells )\n")
 
   # -- UMAP 1: by Leiden cluster -----------------------------------------------
   p_m_clust <- ggplot(umap_m_df, aes(x=UMAP1, y=UMAP2, color=cluster)) +
@@ -3424,12 +3857,18 @@ if (!RUN_VAF_MERGED) {
              " AND it beats the runner-up by >= ", MIN_CORR_MARGIN,
              ". Otherwise best_match is 'unresolved' and why_unresolved says which test failed."),
       "The per-cluster sheets carry every raw correlation regardless; nothing is hidden by this rule.",
-      paste0("MAJOR CAVEAT: GSE292898 ships no cell-type labels, only the CD45-/HLA-DR+ sort gate. ",
-             "VAF and VRC here are RECONSTRUCTED by k-means (k=2) on the Clarke CD45- cells."),
-      paste0("That reconstruction was audited on 2026-09-01: of the cells it calls VAF, the large ",
-             "majority score as islet-endocrine rather than fibroblast (Col1a1 positive in ~4% of ",
-             "them against Ins2 in ~73%). Treat the VAF reference as a mostly-endocrine centroid, ",
-             "not a fibroblast profile, and do not read a VAF match as evidence of fibroblast identity."),
+      paste0("REFERENCE CONSTRUCTION: GSE292898 ships no cell-type labels, only the ",
+             "CD45-/HLA-DR+ sort gate, so the three populations are inferred, not published. "),
+      if (exists("REF_SOURCE_NOTE")) REF_SOURCE_NOTE else "Reference source not recorded.",
+      paste0("MAJOR CAVEAT -- 'VAF' IS NOT FIBROBLAST. In the reference centroids actually used ",
+             "by this run, every fibroblast marker is absent from the VAF profile (mean VST ",
+             "Col1a1 -2.9, Col1a2 -1.5, Pdgfra -3.3, Dcn -3.0, Lum -3.3) while every islet-endocrine ",
+             "marker is strongly positive (Gcg 9.7, Ins2 9.0, Pcsk2 8.0, Chga 7.6). Read a VAF match ",
+             "as 'resembles Clarke's CD45- non-endothelial cells', which are predominantly endocrine -- ",
+             "NOT as evidence of fibroblast identity. Clarke et al. themselves report they could not ",
+             "determine a convincing embryologic origin for this population."),
+      paste0("By contrast CD45pos (Ptprc 7.9) and VRC (Pecam1 9.9, Cdh5 8.7, Plvap 13.9) are ",
+             "cleanly identified by their canonical markers and can be read at face value."),
       "Cluster IDs are re-derived every run and are NOT comparable across runs with a different cell or gene set."),
       stringsAsFactors=FALSE))
     setColWidths(wb_vaf_m, "Notes", cols=1, widths=120)
@@ -3510,7 +3949,7 @@ if (!RUN_VAF_MERGED) {
       "CD45- MHCII+ cell distribution across merged Leiden clusters", startRow=1)
     addStyle(wb_vaf_m, sn_cd, st_h1, rows=1, cols=1)
     writeData(wb_vaf_m, sn_cd, paste0(
-      "Dataset: your cells + Clarke et al. 2025 (CombinedwithVAFPaperPlots). ",
+      "Dataset: your cells + Clarke et al. 2025 (Combined). ",
       "CD45+ MHCII+ reference/normalization wells are EXCLUDED. ",
       "Clusters are the merged all-gene PCA + Leiden clusters."), startRow=2)
     addStyle(wb_vaf_m, sn_cd, st_sub, rows=2, cols=1)
@@ -3658,7 +4097,7 @@ if (!RUN_VAF_MERGED) {
     label             = "merged"
   )
 
-  cat("\nCombinedwithVAFPaperPlots complete.\n")
+  cat("\nCombined complete.\n")
   cat("Output folder:", vaf_out_dir, "\n")
   cat("Files written:\n")
   for (f in list.files(vaf_out_dir)) cat(" -", f, "\n")
@@ -3953,6 +4392,27 @@ nf_type_path <- file.path(nf_out_dir,
                           paste0("umap_all", nrow(nf_df), "_by_cell_type.pdf"))
 ggsave(nf_type_path, nf_p_type, width=7.5, height=6)
 cat("Saved:", nf_type_path, "\n")
+
+# Persist the embedding itself, not just the picture. Without this, "which
+# sample are those outlying points from?" can only be answered by re-running the
+# whole script. This sits on the per-cell-type path deliberately: it used to
+# live inside the NF_RUN_CLUSTER_OUTPUTS block, which is FALSE by default, so
+# the file silently never appeared.
+# nf_df itself only carries UMAP1/UMAP2/cell_id plus the typing columns, so the
+# plate and sort-gate fields are joined back on from nf_meta. Without them the
+# file cannot answer the question it exists for.
+nf_coord_out <- nf_df[, intersect(c("cell_id","UMAP1","UMAP2","cluster","cell_type",
+                                    "type_score","runner_up","type_margin","ambiguous"),
+                                  colnames(nf_df)), drop=FALSE]
+stopifnot(all(nf_coord_out$cell_id %in% rownames(nf_meta)))
+for (nf_col in c("strain","strain_group","condition")) {
+  if (nf_col %in% colnames(nf_meta))
+    nf_coord_out[[nf_col]] <- nf_meta[nf_coord_out$cell_id, nf_col]
+}
+write.csv(nf_coord_out,
+          file.path(nf_out_dir, "umap_coordinates_by_cell.csv"), row.names=FALSE)
+cat("Saved: umap_coordinates_by_cell.csv (", nrow(nf_coord_out), "cells x ",
+    ncol(nf_coord_out), "cols )\n")
 
 # ==============================================================================
 # Violin plots: genes of interest within the focus cell types
@@ -4608,277 +5068,6 @@ run_mca_correlation(
 
 } # end RUN_NOMHCIIFILTER
 
-
-# ==============================================================================
-# DonsPaper: the Clarke/Don GSE292898 mouse data on its own
-# ==============================================================================
-# Standalone by design. Reads the published count matrix directly and shares
-# nothing with the merged analysis: no MHCII filter, no cross-plate gene
-# intersection, no VAF/VRC reconstruction, no batch correction (it is a single
-# dataset). The point is to see what is actually in that dataset before any of
-# this pipeline's assumptions are layered onto it.
-#
-# It also works in Clarke's own gene-symbol space rather than mapping through
-# your Ensembl IDs. Mapping first would silently drop any gene absent from your
-# plates -- the same intersection leakage that broke the VAF marker panels.
-if (!RUN_DONSPAPER) {
-  cat("\nSkipping DonsPaper - RUN_DONSPAPER is FALSE\n")
-} else if (!file.exists(vaf_counts_f2)) {
-  cat("\nSkipping DonsPaper - Clarke count matrix not found at", vaf_counts_f2, "\n")
-} else {
-
-cat("\n==============================================================\n")
-cat("Building DonsPaper analysis (Clarke/Don GSE292898, standalone)...\n")
-cat("==============================================================\n")
-
-dons_dir <- file.path(dge_dir, "DonsPaper")
-dir.create(dons_dir, recursive=TRUE, showWarnings=FALSE)
-
-dons_raw <- read.csv(gzfile(vaf_counts_f2), row.names=1, check.names=FALSE)
-dons_cnt <- as.matrix(dons_raw[, !colnames(dons_raw) %in% c("gene_id","gene_name")])
-rownames(dons_cnt) <- dons_raw[["gene_name"]]
-storage.mode(dons_cnt) <- "numeric"
-dons_cnt <- dons_cnt[!is.na(rownames(dons_cnt)) & rownames(dons_cnt) != "", , drop=FALSE]
-dons_cnt <- dons_cnt[, colSums(dons_cnt) > 0, drop=FALSE]
-cat("Clarke matrix:", nrow(dons_cnt), "genes x", ncol(dons_cnt), "cells\n")
-
-# Sort gate is stated in the column names (e.g. A01cd45POSspMMasRS), so it is
-# read rather than inferred. The pipeline elsewhere guesses this from well
-# position; that guess happens to be right for this dataset, but reading the
-# label cannot silently drift if the layout ever changes.
-dons_gate <- ifelse(grepl("cd45POS", colnames(dons_cnt), ignore.case=TRUE),
-                    "CD45pos", "CD45neg")
-names(dons_gate) <- colnames(dons_cnt)
-cat("Sort gate (from the column names):\n"); print(table(dons_gate))
-
-# Same depth floor as NoMHCIIFilter, for the same reason: shallow cells cluster
-# by library size rather than biology.
-dons_ng   <- colSums(dons_cnt > 0)
-dons_keep <- names(dons_ng)[dons_ng >= NOFILT_MIN_GENES]
-cat("Depth floor: >=", NOFILT_MIN_GENES, "genes detected -> keeping",
-    length(dons_keep), "of", ncol(dons_cnt), "cells\n")
-print(table(dons_gate[dons_keep]))
-dons_cnt <- dons_cnt[, dons_keep, drop=FALSE]
-dons_gate <- dons_gate[dons_keep]
-if (ncol(dons_cnt) < 10) stop("DonsPaper: too few cells survive the depth floor.")
-
-# Low-count gene filter, exempting the genes we are going to plot. A gene with
-# zero counts is a measurement, and dropping it here would make it unplottable
-# rather than plottable as zeros.
-dons_keep_g <- rowSums(dons_cnt) >= 10 | rownames(dons_cnt) %in% DONS_GENES
-cat("Genes passing filter:", sum(dons_keep_g), "of", nrow(dons_cnt), "\n")
-dons_cnt <- dons_cnt[dons_keep_g, , drop=FALSE]
-
-# VST. blind=TRUE so the transformation cannot be informed by the sort gate --
-# the clustering below is meant to be unsupervised.
-dons_dds <- DESeqDataSetFromMatrix(round(dons_cnt),
-                                   data.frame(gate=factor(dons_gate),
-                                              row.names=colnames(dons_cnt)),
-                                   design = ~ 1)
-dons_dds <- estimateSizeFactors(dons_dds, type="poscounts")
-dons_expr <- assay(varianceStabilizingTransformation(dons_dds, blind=TRUE))
-cat("VST complete:", nrow(dons_expr), "genes x", ncol(dons_expr), "cells\n")
-
-# HVG -> PCA -> UMAP for layout; separate all-gene PCA -> Leiden for clusters.
-# Same construction as every other embedding in this script.
-dons_var <- apply(dons_expr, 1, var)
-dons_hvg <- names(sort(dons_var, decreasing=TRUE))[1:min(N_HVG, sum(dons_var > 0))]
-cat("HVGs selected:", length(dons_hvg), "\n")
-cat("Running PCA + UMAP...\n")
-dons_umap <- run_umap(dons_expr[dons_hvg, , drop=FALSE])
-dons_df   <- data.frame(dons_umap, cell_id=rownames(dons_umap),
-                        gate=dons_gate[rownames(dons_umap)],
-                        stringsAsFactors=FALSE)
-
-cat("Running all-gene PCA for clustering...\n")
-dons_nz   <- dons_expr[apply(dons_expr, 1, var) > 0, , drop=FALSE]
-dons_pca  <- prcomp(t(dons_nz), center=TRUE, scale.=FALSE)
-dons_cum  <- cumsum(dons_pca$sdev^2 / sum(dons_pca$sdev^2))
-dons_npc  <- max(2, which(dons_cum >= VAR_THRESHOLD)[1])
-cat("PCs selected:", dons_npc,
-    sprintf("(%.1f%% variance)\n", dons_cum[dons_npc]*100))
-dons_df$cluster <- as.character(run_leiden(dons_pca$x[, 1:dons_npc, drop=FALSE]))
-dons_nclust <- length(unique(dons_df$cluster))
-cat("Clusters found:", dons_nclust, "\n")
-cat("Cells per cluster:\n"); print(table(dons_df$cluster))
-cat("Cluster x sort gate:\n"); print(table(dons_df$cluster, dons_df$gate))
-
-dons_pal <- setNames(scales::hue_pal()(dons_nclust), sort(unique(dons_df$cluster)))
-
-# -- UMAPs ---------------------------------------------------------------------
-mk_umap <- function(colvar, pal, title, sub, legend) {
-  ggplot(dons_df, aes(x=UMAP1, y=UMAP2, color=.data[[colvar]])) +
-    geom_point(size=2, alpha=0.85) +
-    scale_color_manual(values=pal) +
-    labs(title=title, subtitle=sub, color=legend) +
-    theme_bw(base_size=12) +
-    theme(plot.title=element_text(face="bold", size=12),
-          plot.subtitle=element_text(size=9, color="grey40"),
-          panel.grid.minor=element_blank(), aspect.ratio=1)
-}
-dons_sub <- paste0("Clarke/Don GSE292898 mouse, standalone | n=", nrow(dons_df),
-                   " cells >= ", NOFILT_MIN_GENES, " genes\nUMAP: top ",
-                   length(dons_hvg), " HVGs | Clusters: all-gene PCA | resolution=",
-                   LEIDEN_RESOLUTION)
-ggsave(file.path(dons_dir, paste0("umap_dons_all", nrow(dons_df), "_by_cluster.pdf")),
-       mk_umap("cluster", dons_pal,
-               paste0("Clarke/Don 2025 - ", nrow(dons_df), " cells by Leiden cluster"),
-               dons_sub, "Cluster"), width=7.5, height=6)
-cat("Saved: umap_dons_all", nrow(dons_df), "_by_cluster.pdf\n", sep="")
-
-ggsave(file.path(dons_dir, "umap_dons_by_sort_gate.pdf"),
-       mk_umap("gate", c(CD45pos="#2166AC", CD45neg="#B2182B"),
-               "Clarke/Don 2025 - by published sort gate", dons_sub, "Sort gate"),
-       width=7.5, height=6)
-cat("Saved: umap_dons_by_sort_gate.pdf\n")
-
-# -- Cluster marker genes + heatmap --------------------------------------------
-cat("\nRunning Wilcoxon marker analysis (one-vs-rest)...\n")
-dons_cv <- setNames(dons_df$cluster, dons_df$cell_id)
-dons_markers <- list()
-for (cl in sort(unique(dons_cv))) {
-  ins  <- names(dons_cv)[dons_cv == cl]; outs <- names(dons_cv)[dons_cv != cl]
-  if (length(ins) < 3 || length(outs) < 3) {
-    cat("  Cluster", cl, "- too few cells, skipped\n"); next
-  }
-  l2 <- rowMeans(dons_expr[, ins, drop=FALSE]) -
-        rowMeans(dons_expr[, outs, drop=FALSE])
-  cand <- names(l2)[l2 >= MIN_LOG2FC]
-  cat("  Cluster", cl, "(n=", length(ins), "): ", length(cand), " candidates\n", sep="")
-  if (!length(cand)) { dons_markers[[cl]] <- data.frame(); next }
-  pv <- sapply(cand, function(g)
-          wilcox.test(dons_expr[g, ins], dons_expr[g, outs],
-                      alternative="greater", exact=FALSE)$p.value)
-  dons_markers[[cl]] <- data.frame(gene=cand, log2FC=round(l2[cand],4),
-                                   padj=signif(p.adjust(pv, "BH"),4),
-                                   stringsAsFactors=FALSE) %>%
-    filter(padj < MAX_PADJ) %>% arrange(desc(log2FC)) %>%
-    distinct(gene, .keep_all=TRUE)
-  cat("    significant:", nrow(dons_markers[[cl]]),
-      "| top:", if (nrow(dons_markers[[cl]])) dons_markers[[cl]]$gene[1] else "none", "\n")
-}
-
-dons_hm <- c()
-for (cl in names(dons_markers))
-  if (nrow(dons_markers[[cl]]))
-    dons_hm <- c(dons_hm, head(setdiff(dons_markers[[cl]]$gene, dons_hm), TOP_HEATMAP))
-cat("Heatmap genes:", length(dons_hm), "\n")
-
-if (length(dons_hm) >= 2) {
-  ord  <- dons_df$cell_id[order(as.integer(dons_df$cluster))]
-  z    <- t(scale(t(dons_expr[dons_hm, ord, drop=FALSE])))
-  z[z >  2.5] <-  2.5; z[z < -2.5] <- -2.5
-  z    <- z[rowSums(is.na(z)) == 0, , drop=FALSE]
-  ha   <- HeatmapAnnotation(
-            Cluster = dons_df$cluster[match(ord, dons_df$cell_id)],
-            Gate    = dons_df$gate[match(ord, dons_df$cell_id)],
-            col     = list(Cluster = dons_pal,
-                           Gate    = c(CD45pos="#2166AC", CD45neg="#B2182B")),
-            annotation_name_side="left")
-  ht <- Heatmap(z, name="Z-score",
-                col=colorRamp2(c(-2.5,0,2.5), c("#3D0751","#1A1A1A","#F5E642")),
-                top_annotation=ha, show_column_names=FALSE, show_row_names=TRUE,
-                row_names_gp=gpar(fontsize=7, fontface="italic"),
-                cluster_rows=FALSE, cluster_columns=FALSE, row_title=NULL,
-                column_title=paste0("Clarke/Don cluster markers - ", nrow(z),
-                                    " genes x ", ncol(z), " cells"),
-                column_title_gp=gpar(fontsize=12, fontface="bold"),
-                heatmap_legend_param=list(title="Z-score\n(VST)",
-                                          legend_height=unit(3,"cm")),
-                use_raster=TRUE, raster_quality=5, raster_device=HT_RASTER_DEVICE)
-  pdf(file.path(dons_dir, "heatmap_cluster_markers.pdf"),
-      width=16, height=max(8, nrow(z)*0.18+3))
-  draw(ht, heatmap_legend_side="right", annotation_legend_side="bottom")
-  dev.off()
-  cat("Saved: heatmap_cluster_markers.pdf\n")
-} else cat("Too few marker genes for a heatmap - skipped\n")
-
-# -- Violins for the requested genes -------------------------------------------
-cat("\nGenerating violin plots for", paste(DONS_GENES, collapse=", "), "...\n")
-dons_lib <- pmax(colSums(dons_cnt), 1)
-dons_have <- intersect(DONS_GENES, rownames(dons_expr))
-if (length(setdiff(DONS_GENES, dons_have)))
-  cat("  not in the matrix:", paste(setdiff(DONS_GENES, dons_have), collapse=", "), "\n")
-
-if (length(dons_have)) {
-  vp <- lapply(dons_have, function(g) {
-    d <- data.frame(cluster=factor(dons_df$cluster,
-                                   levels=sort(unique(as.integer(dons_df$cluster)))),
-                    VST=dons_expr[g, dons_df$cell_id],
-                    det=dons_cnt[g, dons_df$cell_id] > 0)
-    # Detection per cluster on the axis: VST is compressive, so a gene that is
-    # off in most cells piles up at the floor and the shape alone cannot
-    # distinguish "absent" from "present in a minority".
-    lab <- sapply(levels(d$cluster), function(k) {
-      dd <- d[d$cluster == k, ]
-      sprintf("%s\nn=%d, %d det (%.0f%%)", k, nrow(dd), sum(dd$det), 100*mean(dd$det))
-    })
-    ggplot(d, aes(x=cluster, y=VST, fill=cluster)) +
-      geom_violin(trim=TRUE, scale="width", alpha=0.85, linewidth=0.3) +
-      geom_jitter(width=0.15, size=0.9, alpha=0.5, color="grey15") +
-      scale_fill_manual(values=dons_pal) + scale_x_discrete(labels=lab) +
-      labs(title=g, subtitle=sprintf("detected in %d/%d cells overall",
-                                     sum(d$det), nrow(d)),
-           x="Leiden cluster", y="VST expression") +
-      theme_bw(base_size=11) +
-      theme(plot.title=element_text(face="bold.italic", size=12),
-            plot.subtitle=element_text(size=8, color="grey40"),
-            legend.position="none", panel.grid.minor=element_blank())
-  })
-  panel <- wrap_plots(vp, ncol=2) +
-    plot_annotation(title="Clarke/Don 2025 - marker expression by cluster",
-                    subtitle=dons_sub,
-                    theme=theme(plot.title=element_text(face="bold", size=13),
-                                plot.subtitle=element_text(size=9, color="grey40")))
-  ggsave(file.path(dons_dir, "violin_markers_by_cluster.pdf"), panel,
-         width=11, height=5*ceiling(length(vp)/2))
-  cat("Saved: violin_markers_by_cluster.pdf\n")
-
-  cat("\n  Detection by cluster:\n")
-  for (g in dons_have) {
-    cat("   ", g, ":", paste(sapply(sort(unique(dons_df$cluster)), function(k) {
-      cs <- dons_df$cell_id[dons_df$cluster == k]
-      sprintf("c%s %d/%d", k, sum(dons_cnt[g, cs] > 0), length(cs))
-    }), collapse="  "), "\n")
-  }
-}
-
-# -- Marker workbook -----------------------------------------------------------
-wb_d <- createWorkbook()
-summ <- do.call(rbind, lapply(names(dons_markers), function(cl) data.frame(
-  cluster=cl, n_cells=sum(dons_cv==cl),
-  n_CD45pos=sum(dons_gate[names(dons_cv)[dons_cv==cl]]=="CD45pos"),
-  n_CD45neg=sum(dons_gate[names(dons_cv)[dons_cv==cl]]=="CD45neg"),
-  n_markers=nrow(dons_markers[[cl]]),
-  top_markers=paste(head(dons_markers[[cl]]$gene,10), collapse=", "),
-  stringsAsFactors=FALSE)))
-addWorksheet(wb_d, "Summary"); writeData(wb_d, "Summary", summ)
-setColWidths(wb_d, "Summary", cols=1:6, widths=c(9,9,11,11,11,70))
-for (cl in names(dons_markers)) {
-  if (!nrow(dons_markers[[cl]])) next
-  sn <- paste0("Cluster_", cl)
-  addWorksheet(wb_d, sn); writeData(wb_d, sn, head(dons_markers[[cl]], TOP_EXCEL))
-  setColWidths(wb_d, sn, cols=1:3, widths=c(16,12,12))
-}
-addWorksheet(wb_d, "Notes")
-writeData(wb_d, "Notes", data.frame(Note=c(
-  "Clarke/Don GSE292898 mouse data analysed ALONE - none of your cells are included.",
-  "No MHCII filter, no cross-plate gene intersection, no batch correction (single dataset).",
-  paste0("Depth floor: >= ", NOFILT_MIN_GENES, " genes detected per cell."),
-  "Sort gate is read from the published column names (cd45POS / cd45NEG), not inferred from well position.",
-  "VST is blind=TRUE, so the transformation is not informed by the sort gate; clustering is unsupervised.",
-  "No VAF/VRC labels are applied here. GSE292898 ships no cell-type annotation - the 'cell type' column is empty for all samples - so any VAF/VRC split elsewhere in this pipeline is reconstructed, not published.",
-  "Cluster IDs are re-derived every run and are not comparable across runs."),
-  stringsAsFactors=FALSE))
-setColWidths(wb_d, "Notes", cols=1, widths=125)
-saveWorkbook(wb_d, file.path(dons_dir, "cluster_marker_genes.xlsx"), overwrite=TRUE)
-cat("Saved: cluster_marker_genes.xlsx\n")
-
-cat("\nDonsPaper complete. Files:\n")
-for (f in list.files(dons_dir)) cat(" -", f, "\n")
-
-} # end DonsPaper
-
 cat("\n==============================================================\n")
 cat("All outputs complete. Output structure:\n")
 if (RUN_PER_STRAIN_PLOTS) {
@@ -4900,6 +5089,7 @@ if (RUN_COMBINED_PLOTS) {
 }
 cat(" results/05_dge/NoMHCIIFilter/\n")
 cat("   - umap_all*_by_cell_type.pdf\n")
+cat("   - umap_coordinates_by_cell.csv  (per-cell UMAP coords + plate/condition)\n")
 cat("   - violin_GOI_by_cell_type.pdf  (",
     paste(NF_GENES_OF_INTEREST, collapse=", "), " in ",
     paste(NF_FOCUS_TYPES, collapse=" / "), ")\n", sep="")
@@ -4907,13 +5097,13 @@ cat("   - GOI_expression_by_cell.xlsx\n")
 cat("   - expression_all_genes_by_cell_VST.csv\n")
 cat("   - expression_all_genes_by_cell_counts.csv\n")
 if (NF_RUN_CLUSTER_OUTPUTS) cat("   - (legacy cluster outputs also written)\n")
-if (RUN_DONSPAPER) {
-  cat(" results/05_dge/DonsPaper/  (Clarke/Don GSE292898 alone)\n")
-  cat("   - umap_dons_all*_by_cluster.pdf\n")
-  cat("   - umap_dons_by_sort_gate.pdf\n")
+if (RUN_CLARKEONLY) {
+  cat(" results/05_dge/ClarkeOnly/  (Clarke/Don GSE292898 alone)\n")
+  cat("   - umap_co2_all*_by_cluster.pdf\n")
+  cat("   - umap_co2_by_sort_gate.pdf\n")
   cat("   - heatmap_cluster_markers.pdf\n")
   cat("   - violin_markers_by_cluster.pdf  (",
-      paste(DONS_GENES, collapse=", "), ")\n", sep="")
+      paste(CLARKE_VIOLIN_GENES, collapse=", "), ")\n", sep="")
   cat("   - cluster_marker_genes.xlsx\n")
 }
 cat("==============================================================\n")
