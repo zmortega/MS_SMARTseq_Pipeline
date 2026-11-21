@@ -364,6 +364,31 @@ RUN_VAF_MERGED       <- TRUE    # results/05_dge/Combined/
 RUN_NOMHCIIFILTER    <- TRUE    # results/05_dge/NoMHCIIFilter/
 RUN_CLARKEONLY        <- TRUE    # results/05_dge/ClarkeOnly/
 
+# -- Which merged analyses to build --------------------------------------------
+# Each entry produces one folder under results/05_dge/ with the full Combined
+# output set (UMAP, clusters, markers, pairwise contrasts, VAF/VRC correlation,
+# cell identity, MCA). Clarke's cells are always included -- they are the
+# reference the clusters are scored against -- so `strains` lists only which of
+# YOUR plates go in. NULL means every plate.
+#
+# WHY THE GENE SET IS REBUILT PER SPEC, NOT SUBSET FROM combined_expr:
+# combined_expr is the intersection across ALL plates, so a gene that one plate
+# honestly reports as zero is deleted for every plate. Carrying that into a
+# 2-plate analysis would let plates you deliberately excluded keep shrinking the
+# gene set -- NODCD31 is a pure CD31 sort with no fibroblasts and zeroes out
+# Col1a1/Col1a2, which has no business constraining a NOD-vs-NOD2 comparison.
+# Each spec therefore re-intersects from all_expr_list over its own plates only,
+# exactly as the all-plate path does. Expect a LARGER gene set for a subset.
+#
+# Consequence: clusters, cluster numbering and the gene set differ between
+# specs. They are separate analyses that happen to share a reference, not
+# subsets of one clustering, and cluster 2 in one folder has no relationship to
+# cluster 2 in another.
+MERGE_SPECS <- list(
+  list(name = "Combined",        strains = NULL),
+  list(name = "NOD_NOD2_Clarke", strains = c("NOD", "NOD2"))
+)
+
 # Genes given a per-cluster violin panel in the ClarkeOnly analysis.
 CLARKE_VIOLIN_GENES <- c("Ptprc", "Col1a1", "Col1a2", "Pecam1")
 
@@ -3076,1031 +3101,1071 @@ if (!RUN_VAF_MERGED) {
   cat("Place file at:", vaf_counts_f2, "\n")
 } else {
 
-  vaf_out_dir <- file.path(dge_dir, "Combined")
-  dir.create(vaf_out_dir, showWarnings=FALSE, recursive=TRUE)
 
-  # -- Load Clarke counts ------------------------------------------------------
-  cat("Loading Clarke et al. mouse count matrix...\n")
-  vaf_raw2      <- read.csv(gzfile(vaf_counts_f2), row.names=1, check.names=FALSE)
-  vaf_gene_sym2 <- vaf_raw2[["gene_name"]]
-  vaf_cnt_mat2  <- as.matrix(vaf_raw2[, !colnames(vaf_raw2) %in%
-                                        c("gene_id","gene_name")])
-  rownames(vaf_cnt_mat2) <- vaf_gene_sym2
-  storage.mode(vaf_cnt_mat2) <- "numeric"
-  cat("Clarke matrix:", nrow(vaf_cnt_mat2), "genes x",
-      ncol(vaf_cnt_mat2), "cells\n")
+  # One pass per entry in MERGE_SPECS. Everything below is rebuilt from scratch
+  # each pass -- gene set, VST subset, batch correction, HVGs, PCA, clustering --
+  # so the folders are independent analyses, not re-colourings of one embedding.
+  for (mg in MERGE_SPECS) {
 
-  # -- Map Clarke gene symbols to Ensembl IDs ----------------------------------
-  # Your pipeline uses Ensembl IDs as rownames; Clarke uses symbols
-  # Build reverse map: symbol -> first Ensembl ID
-  ens_to_sym_vec <- to_sym(rownames(combined_expr))
-  sym_to_ens_rev <- tapply(rownames(combined_expr), ens_to_sym_vec, `[`, 1)
-
-  clarke_syms_in_yours <- intersect(rownames(vaf_cnt_mat2),
-                                     names(sym_to_ens_rev))
-  cat("Clarke genes mappable to your Ensembl IDs:", length(clarke_syms_in_yours),
-      "\n")
-
-  # Subset Clarke to mappable genes, reindex by Ensembl
-  vaf_cnt_sub <- vaf_cnt_mat2[clarke_syms_in_yours, , drop=FALSE]
-  ens_ids_for_clarke <- sym_to_ens_rev[clarke_syms_in_yours]
-  rownames(vaf_cnt_sub) <- ens_ids_for_clarke
-
-  # -- MHCII filter on Clarke cells --------------------------------------------
-  cat("Applying MHCII filter to Clarke cells...\n")
-  mhcii_ens_clarke <- sym_to_ens_rev[MHCII_GENES]
-  mhcii_ens_clarke <- mhcii_ens_clarke[!is.na(mhcii_ens_clarke) &
-                                         mhcii_ens_clarke %in% rownames(vaf_cnt_sub)]
-  if (length(mhcii_ens_clarke) >= 2) {
-    lib_c       <- colSums(vaf_cnt_sub)
-    cpm_c       <- sweep(vaf_cnt_sub, 2, pmax(lib_c, 1), "/") * 1e6
-    logcpm_c    <- log1p(cpm_c)
-    # Same rule as our cells, so both sides of the merge are gated identically.
-    # Every Clarke cell was sorted MHCII-positive, so none bypass.
-    passes_c    <- colSums(vaf_cnt_sub[mhcii_ens_clarke, , drop=FALSE] >=
-                             MHCII_MIN_COUNT) >= MHCII_REQUIRE_N
-    vaf_cnt_sub <- vaf_cnt_sub[, passes_c, drop=FALSE]
-    cat("Clarke cells passing MHCII filter:", ncol(vaf_cnt_sub), "/",
-        sum(!is.na(passes_c)), "\n")
-  } else {
-    cat("WARNING: MHCII genes not found in Clarke data, skipping filter\n")
-  }
-
-  # -- DESeq2 VST on Clarke cells ----------------------------------------------
-  cat("Running DESeq2 VST on Clarke cells...\n")
-
-  # Assign population labels based on cell ID prefix
-  clarke_cell_ids <- colnames(vaf_cnt_sub)
-  clarke_cd45pos  <- grepl("^A[0-9]", clarke_cell_ids)
-
-  # For CD45neg: reuse k-means VAF/VRC assignment from earlier
-  # Recompute on the filtered subset
-  cd45neg_ids <- clarke_cell_ids[!clarke_cd45pos]
-  if (length(cd45neg_ids) >= 4) {
-    logcpm_neg_sub <- log1p(sweep(
-      vaf_cnt_sub[, cd45neg_ids, drop=FALSE], 2,
-      pmax(colSums(vaf_cnt_sub[, cd45neg_ids, drop=FALSE]), 1), "/") * 1e6)
-    gv_neg   <- apply(logcpm_neg_sub, 1, var)
-    top_neg  <- names(sort(gv_neg, decreasing=TRUE))[1:min(500, length(gv_neg))]
-    pca_neg  <- prcomp(t(logcpm_neg_sub[top_neg, ]), center=TRUE, scale.=FALSE)
-    set.seed(UMAP_SEED)
-    km_neg   <- kmeans(pca_neg$x[, 1:min(10, ncol(pca_neg$x))],
-                        centers=2, nstart=25)
-
-    # -- Orientation: which k-means cluster is VAF? ---------------------------
-    # Deciding this is a CLARKE-INTERNAL question and must not depend on your
-    # gene universe. Two traps live here, both previously active:
-    #
-    # 1. SYMBOL vs ENSEMBL. logcpm_neg_sub is indexed by Ensembl ID (rownames
-    #    were replaced at the reindex step above) while the marker panels are
-    #    symbols, so intersecting them directly returned character(0). That
-    #    propagated silently: 0-row matrix -> colMeans -> mean() = NaN
-    #    -> sc1 > sc2 = NA -> ifelse(NA,1,2) = NA -> cluster == NA = all NA
-    #    -> cd45neg_ids[all-NA] = NAs for BOTH groups -> %in% never matches NA
-    #    -> every CD45neg cell fell through to "VRC". The tell in the log was
-    #    "Clarke VAF cells: 96 | VRC cells: 96" for 96 total cells.
-    #
-    # 2. INTERSECTION LEAKAGE. Routing markers through sym_to_ens_rev (built
-    #    from combined_expr, the all-plate intersection) meant a marker absent
-    #    from ANY ONE of your plates was unavailable here. NODCD31 has exactly
-    #    0 counts for Col1a1 and Col1a2 — a pure CD31 sort has no fibroblasts —
-    #    which deleted the two canonical VAF markers and left 1 usable gene per
-    #    panel. Adding a plate must never weaken the Clarke reference labeling.
-    #
-    # Fix for both: orient on Clarke's own symbol-indexed matrix (vaf_cnt_mat2,
-    # pre-Ensembl-reindexing, pre-intersection), restricted to the same cells.
-    orient_mat <- vaf_cnt_mat2[, cd45neg_ids, drop=FALSE]
-    orient_lcpm <- log1p(sweep(orient_mat, 2,
-                                pmax(colSums(orient_mat), 1), "/") * 1e6)
-
-    VAF_MARKERS <- c("Col1a1","Col1a2","Timp3","Spp1","Thy1","Pdpn")
-    VRC_MARKERS <- c("Pecam1","Eng","Cdh5","Kdr","Tie1","Vwf")
-    vaf_m <- intersect(VAF_MARKERS, rownames(orient_lcpm))
-    vrc_m <- intersect(VRC_MARKERS, rownames(orient_lcpm))
-    cat("  VAF orientation markers found:", length(vaf_m), "/",
-        length(VAF_MARKERS), "(", paste(vaf_m, collapse=","), ")\n")
-    cat("  VRC orientation markers found:", length(vrc_m), "/",
-        length(VRC_MARKERS), "(", paste(vrc_m, collapse=","), ")\n")
-
-    # Require a real panel, not a single gene — one marker is a coin flip if
-    # that gene happens to be bimodal or dropout-prone in this dataset.
-    MIN_ORIENT_MARKERS <- 3
-    if (length(vaf_m) < MIN_ORIENT_MARKERS ||
-        length(vrc_m) < MIN_ORIENT_MARKERS) {
-      stop("Too few VAF/VRC orientation markers in the Clarke matrix (VAF: ",
-           length(vaf_m), ", VRC: ", length(vrc_m), "; need >= ",
-           MIN_ORIENT_MARKERS, " each). Refusing to label — orienting on a ",
-           "near-empty panel silently misassigns entire populations.")
+    mg_strains <- if (is.null(mg$strains)) names(all_expr_list) else mg$strains
+    mg_absent  <- setdiff(mg_strains, names(all_expr_list))
+    if (length(mg_absent)) {
+      cat("\n*** SKIPPING merged spec '", mg$name, "': no such plate(s): ",
+          paste(mg_absent, collapse=", "), ". Available: ",
+          paste(names(all_expr_list), collapse=", "), " ***\n", sep="")
+      next
     }
 
-    # Orient using BOTH panels: the VAF cluster is the one higher in VAF
-    # markers AND lower in VRC markers, so a cluster high in both cannot win.
-    sc1 <- mean(colMeans(orient_lcpm[vaf_m, km_neg$cluster==1, drop=FALSE])) -
-           mean(colMeans(orient_lcpm[vrc_m, km_neg$cluster==1, drop=FALSE]))
-    sc2 <- mean(colMeans(orient_lcpm[vaf_m, km_neg$cluster==2, drop=FALSE])) -
-           mean(colMeans(orient_lcpm[vrc_m, km_neg$cluster==2, drop=FALSE]))
-    if (is.na(sc1) || is.na(sc2)) {
-      stop("Clarke VAF/VRC orientation scores are NA (sc1=", sc1, ", sc2=", sc2,
-           "). Refusing to label.")
+    cat("\n--------------------------------------------------------------\n")
+    cat("Merged analysis '", mg$name, "': your plates = ",
+        paste(mg_strains, collapse=", "), " (+ Clarke2025)\n", sep="")
+    cat("--------------------------------------------------------------\n")
+
+    # Re-intersect over THIS spec's plates only (see MERGE_SPECS comment).
+    mg_genes <- Reduce(intersect, lapply(all_expr_list[mg_strains], rownames))
+    cmb_expr <- do.call(cbind, lapply(all_expr_list[mg_strains],
+                                      function(e) e[mg_genes, , drop=FALSE]))
+    cmb_meta <- do.call(rbind, all_meta_list[mg_strains])
+    cmb_meta$condition    <- as.character(cmb_meta$condition)
+    cmb_meta$strain       <- as.character(cmb_meta$strain)
+    cmb_meta$strain_group <- as.character(cmb_meta$strain_group)
+    rownames(cmb_meta)    <- cmb_meta$cell_id
+    cmb_meta <- cmb_meta[colnames(cmb_expr), , drop=FALSE]
+    cmb_meta$strain_condition <- paste0(cmb_meta$strain_group, " ",
+                                        clean_label(cmb_meta$condition))
+    stopifnot(identical(rownames(cmb_meta), colnames(cmb_expr)),
+              !anyNA(cmb_meta$strain_condition))
+    cat("  Genes common across these plates: ", length(mg_genes),
+        "  |  your cells: ", ncol(cmb_expr), "\n", sep="")
+
+    vaf_out_dir <- file.path(dge_dir, mg$name)
+
+    dir.create(vaf_out_dir, showWarnings=FALSE, recursive=TRUE)
+
+    # -- Load Clarke counts ------------------------------------------------------
+    cat("Loading Clarke et al. mouse count matrix...\n")
+    vaf_raw2      <- read.csv(gzfile(vaf_counts_f2), row.names=1, check.names=FALSE)
+    vaf_gene_sym2 <- vaf_raw2[["gene_name"]]
+    vaf_cnt_mat2  <- as.matrix(vaf_raw2[, !colnames(vaf_raw2) %in%
+                                          c("gene_id","gene_name")])
+    rownames(vaf_cnt_mat2) <- vaf_gene_sym2
+    storage.mode(vaf_cnt_mat2) <- "numeric"
+    cat("Clarke matrix:", nrow(vaf_cnt_mat2), "genes x",
+        ncol(vaf_cnt_mat2), "cells\n")
+
+    # -- Map Clarke gene symbols to Ensembl IDs ----------------------------------
+    # Your pipeline uses Ensembl IDs as rownames; Clarke uses symbols
+    # Build reverse map: symbol -> first Ensembl ID
+    ens_to_sym_vec <- to_sym(rownames(cmb_expr))
+    sym_to_ens_rev <- tapply(rownames(cmb_expr), ens_to_sym_vec, `[`, 1)
+
+    clarke_syms_in_yours <- intersect(rownames(vaf_cnt_mat2),
+                                       names(sym_to_ens_rev))
+    cat("Clarke genes mappable to your Ensembl IDs:", length(clarke_syms_in_yours),
+        "\n")
+
+    # Subset Clarke to mappable genes, reindex by Ensembl
+    vaf_cnt_sub <- vaf_cnt_mat2[clarke_syms_in_yours, , drop=FALSE]
+    ens_ids_for_clarke <- sym_to_ens_rev[clarke_syms_in_yours]
+    rownames(vaf_cnt_sub) <- ens_ids_for_clarke
+
+    # -- MHCII filter on Clarke cells --------------------------------------------
+    cat("Applying MHCII filter to Clarke cells...\n")
+    mhcii_ens_clarke <- sym_to_ens_rev[MHCII_GENES]
+    mhcii_ens_clarke <- mhcii_ens_clarke[!is.na(mhcii_ens_clarke) &
+                                           mhcii_ens_clarke %in% rownames(vaf_cnt_sub)]
+    if (length(mhcii_ens_clarke) >= 2) {
+      lib_c       <- colSums(vaf_cnt_sub)
+      cpm_c       <- sweep(vaf_cnt_sub, 2, pmax(lib_c, 1), "/") * 1e6
+      logcpm_c    <- log1p(cpm_c)
+      # Same rule as our cells, so both sides of the merge are gated identically.
+      # Every Clarke cell was sorted MHCII-positive, so none bypass.
+      passes_c    <- colSums(vaf_cnt_sub[mhcii_ens_clarke, , drop=FALSE] >=
+                               MHCII_MIN_COUNT) >= MHCII_REQUIRE_N
+      vaf_cnt_sub <- vaf_cnt_sub[, passes_c, drop=FALSE]
+      cat("Clarke cells passing MHCII filter:", ncol(vaf_cnt_sub), "/",
+          sum(!is.na(passes_c)), "\n")
+    } else {
+      cat("WARNING: MHCII genes not found in Clarke data, skipping filter\n")
     }
-    vaf_cluster <- if (sc1 > sc2) 1L else 2L
-    vaf_ids_c <- cd45neg_ids[km_neg$cluster == vaf_cluster]
-    vrc_ids_c <- cd45neg_ids[km_neg$cluster != vaf_cluster]
-    cat("  Orientation scores (VAF minus VRC) - cluster1:", round(sc1, 3),
-        "| cluster2:", round(sc2, 3), "\n")
-    cat("Clarke VAF cells:", length(vaf_ids_c),
-        "| VRC cells:", length(vrc_ids_c), "\n")
-    stopifnot(length(vaf_ids_c) + length(vrc_ids_c) == length(cd45neg_ids),
-              !anyNA(vaf_ids_c), !anyNA(vrc_ids_c))
-  } else {
-    vaf_ids_c <- cd45neg_ids
-    vrc_ids_c <- character(0)
-  }
 
-  # Build condition vector for Clarke cells
-  clarke_condition <- ifelse(clarke_cd45pos, "CD45pos_MHCIIpos",
-                      ifelse(clarke_cell_ids %in% vaf_ids_c, "VAF", "VRC"))
+    # -- DESeq2 VST on Clarke cells ----------------------------------------------
+    cat("Running DESeq2 VST on Clarke cells...\n")
 
-  # Build a simple colData and run VST
-  clarke_col_data <- data.frame(
-    condition = factor(clarke_condition),
-    row.names = clarke_cell_ids
-  )
-  # Round counts, filter low-count genes
-  vaf_cnt_round <- round(vaf_cnt_sub)
-  keep_c        <- rowSums(vaf_cnt_round) >= 10
-  vaf_cnt_round <- vaf_cnt_round[keep_c, , drop=FALSE]
+    # Assign population labels based on cell ID prefix
+    clarke_cell_ids <- colnames(vaf_cnt_sub)
+    clarke_cd45pos  <- grepl("^A[0-9]", clarke_cell_ids)
 
-  dds_clarke <- DESeqDataSetFromMatrix(
-    countData = vaf_cnt_round,
-    colData   = clarke_col_data,
-    design    = ~ condition
-  )
-  dds_clarke <- estimateSizeFactors(dds_clarke, type="poscounts")
-  vsd_clarke <- varianceStabilizingTransformation(dds_clarke, blind=TRUE)
-  expr_clarke <- assay(vsd_clarke)
-  cat("Clarke VST complete:", nrow(expr_clarke), "genes x",
-      ncol(expr_clarke), "cells\n")
+    # For CD45neg: reuse k-means VAF/VRC assignment from earlier
+    # Recompute on the filtered subset
+    cd45neg_ids <- clarke_cell_ids[!clarke_cd45pos]
+    if (length(cd45neg_ids) >= 4) {
+      logcpm_neg_sub <- log1p(sweep(
+        vaf_cnt_sub[, cd45neg_ids, drop=FALSE], 2,
+        pmax(colSums(vaf_cnt_sub[, cd45neg_ids, drop=FALSE]), 1), "/") * 1e6)
+      gv_neg   <- apply(logcpm_neg_sub, 1, var)
+      top_neg  <- names(sort(gv_neg, decreasing=TRUE))[1:min(500, length(gv_neg))]
+      pca_neg  <- prcomp(t(logcpm_neg_sub[top_neg, ]), center=TRUE, scale.=FALSE)
+      set.seed(UMAP_SEED)
+      km_neg   <- kmeans(pca_neg$x[, 1:min(10, ncol(pca_neg$x))],
+                          centers=2, nstart=25)
 
-  # -- Build metadata for Clarke cells -----------------------------------------
-  meta_clarke <- data.frame(
-    cell_id      = clarke_cell_ids,
-    strain       = "Clarke2025",
-    strain_group = "Clarke2025",
-    condition    = clarke_condition,
-    strain_condition = paste0("Clarke2025 ",
-      ifelse(clarke_cd45pos, "CD45pos",
-      ifelse(clarke_cell_ids %in% vaf_ids_c, "VAF", "VRC"))),
-    row.names = clarke_cell_ids,
-    stringsAsFactors = FALSE
-  )
+      # -- Orientation: which k-means cluster is VAF? ---------------------------
+      # Deciding this is a CLARKE-INTERNAL question and must not depend on your
+      # gene universe. Two traps live here, both previously active:
+      #
+      # 1. SYMBOL vs ENSEMBL. logcpm_neg_sub is indexed by Ensembl ID (rownames
+      #    were replaced at the reindex step above) while the marker panels are
+      #    symbols, so intersecting them directly returned character(0). That
+      #    propagated silently: 0-row matrix -> colMeans -> mean() = NaN
+      #    -> sc1 > sc2 = NA -> ifelse(NA,1,2) = NA -> cluster == NA = all NA
+      #    -> cd45neg_ids[all-NA] = NAs for BOTH groups -> %in% never matches NA
+      #    -> every CD45neg cell fell through to "VRC". The tell in the log was
+      #    "Clarke VAF cells: 96 | VRC cells: 96" for 96 total cells.
+      #
+      # 2. INTERSECTION LEAKAGE. Routing markers through sym_to_ens_rev (built
+      #    from cmb_expr, this spec's cross-plate intersection) meant a marker absent
+      #    from ANY ONE of your plates was unavailable here. NODCD31 has exactly
+      #    0 counts for Col1a1 and Col1a2 — a pure CD31 sort has no fibroblasts —
+      #    which deleted the two canonical VAF markers and left 1 usable gene per
+      #    panel. Adding a plate must never weaken the Clarke reference labeling.
+      #
+      # Fix for both: orient on Clarke's own symbol-indexed matrix (vaf_cnt_mat2,
+      # pre-Ensembl-reindexing, pre-intersection), restricted to the same cells.
+      orient_mat <- vaf_cnt_mat2[, cd45neg_ids, drop=FALSE]
+      orient_lcpm <- log1p(sweep(orient_mat, 2,
+                                  pmax(colSums(orient_mat), 1), "/") * 1e6)
 
-  # -- Merge your VST with Clarke VST ------------------------------------------
-  common_ens <- intersect(rownames(combined_expr), rownames(expr_clarke))
-  cat("Common Ensembl IDs for merged matrix:", length(common_ens), "\n")
+      VAF_MARKERS <- c("Col1a1","Col1a2","Timp3","Spp1","Thy1","Pdpn")
+      VRC_MARKERS <- c("Pecam1","Eng","Cdh5","Kdr","Tie1","Vwf")
+      vaf_m <- intersect(VAF_MARKERS, rownames(orient_lcpm))
+      vrc_m <- intersect(VRC_MARKERS, rownames(orient_lcpm))
+      cat("  VAF orientation markers found:", length(vaf_m), "/",
+          length(VAF_MARKERS), "(", paste(vaf_m, collapse=","), ")\n")
+      cat("  VRC orientation markers found:", length(vrc_m), "/",
+          length(VRC_MARKERS), "(", paste(vrc_m, collapse=","), ")\n")
 
-  merged_expr_raw <- cbind(combined_expr[common_ens, ],
-                            expr_clarke[common_ens, ])
-  cat("Merged matrix (pre-correction):", nrow(merged_expr_raw), "genes x",
-      ncol(merged_expr_raw), "cells\n")
+      # Require a real panel, not a single gene — one marker is a coin flip if
+      # that gene happens to be bimodal or dropout-prone in this dataset.
+      MIN_ORIENT_MARKERS <- 3
+      if (length(vaf_m) < MIN_ORIENT_MARKERS ||
+          length(vrc_m) < MIN_ORIENT_MARKERS) {
+        stop("Too few VAF/VRC orientation markers in the Clarke matrix (VAF: ",
+             length(vaf_m), ", VRC: ", length(vrc_m), "; need >= ",
+             MIN_ORIENT_MARKERS, " each). Refusing to label — orienting on a ",
+             "near-empty panel silently misassigns entire populations.")
+      }
 
-  # -- Build merged metadata BEFORE batch correction (needed as covariate) ---
-  your_meta_sub <- combined_meta[, c("cell_id","strain","strain_group",
-                                      "condition","strain_condition")]
-  meta_merged <- rbind(your_meta_sub, meta_clarke[, colnames(your_meta_sub)])
-  rownames(meta_merged) <- meta_merged$cell_id
-  cat("Merged metadata:", nrow(meta_merged), "rows\n")
+      # Orient using BOTH panels: the VAF cluster is the one higher in VAF
+      # markers AND lower in VRC markers, so a cluster high in both cannot win.
+      sc1 <- mean(colMeans(orient_lcpm[vaf_m, km_neg$cluster==1, drop=FALSE])) -
+             mean(colMeans(orient_lcpm[vrc_m, km_neg$cluster==1, drop=FALSE]))
+      sc2 <- mean(colMeans(orient_lcpm[vaf_m, km_neg$cluster==2, drop=FALSE])) -
+             mean(colMeans(orient_lcpm[vrc_m, km_neg$cluster==2, drop=FALSE]))
+      if (is.na(sc1) || is.na(sc2)) {
+        stop("Clarke VAF/VRC orientation scores are NA (sc1=", sc1, ", sc2=", sc2,
+             "). Refusing to label.")
+      }
+      vaf_cluster <- if (sc1 > sc2) 1L else 2L
+      vaf_ids_c <- cd45neg_ids[km_neg$cluster == vaf_cluster]
+      vrc_ids_c <- cd45neg_ids[km_neg$cluster != vaf_cluster]
+      cat("  Orientation scores (VAF minus VRC) - cluster1:", round(sc1, 3),
+          "| cluster2:", round(sc2, 3), "\n")
+      cat("Clarke VAF cells:", length(vaf_ids_c),
+          "| VRC cells:", length(vrc_ids_c), "\n")
+      stopifnot(length(vaf_ids_c) + length(vrc_ids_c) == length(cd45neg_ids),
+                !anyNA(vaf_ids_c), !anyNA(vrc_ids_c))
+    } else {
+      vaf_ids_c <- cd45neg_ids
+      vrc_ids_c <- character(0)
+    }
 
-  # -- Batch correction: limma::removeBatchEffect ----------------------------
-  # Corrects for the between-dataset expression scale difference while
-  # preserving biological variation. Applied only for this merged analysis;
-  # all other outputs use the uncorrected per-plate VST.
-  if (!requireNamespace("limma", quietly=TRUE)) {
-    cat("  Installing limma...\n")
-    if (!requireNamespace("BiocManager", quietly=TRUE))
-      install.packages("BiocManager", repos="https://cloud.r-project.org", quiet=TRUE)
-    BiocManager::install("limma", ask=FALSE, update=FALSE, quiet=TRUE)
-  }
-  suppressPackageStartupMessages(library(limma))
+    # Build condition vector for Clarke cells
+    clarke_condition <- ifelse(clarke_cd45pos, "CD45pos_MHCIIpos",
+                        ifelse(clarke_cell_ids %in% vaf_ids_c, "VAF", "VRC"))
 
-  # Batch is now the PLATE, not the dataset. Clarke2025 is itself a plate-level
-  # batch, so this subsumes the old yours-vs-clarke correction rather than
-  # replacing it: correcting per plate necessarily removes the between-dataset
-  # offset too.
-  all_cells_merged    <- colnames(merged_expr_raw)
-  meta_merged_ordered <- meta_merged[all_cells_merged, ]
-  cat("  Batch composition by plate:\n")
-  print(table(meta_merged_ordered$strain))
+    # Build a simple colData and run VST
+    clarke_col_data <- data.frame(
+      condition = factor(clarke_condition),
+      row.names = clarke_cell_ids
+    )
+    # Round counts, filter low-count genes
+    vaf_cnt_round <- round(vaf_cnt_sub)
+    keep_c        <- rowSums(vaf_cnt_round) >= 10
+    vaf_cnt_round <- vaf_cnt_round[keep_c, , drop=FALSE]
 
-  merged_expr <- apply_plate_correction(
-    merged_expr_raw,
-    plate     = meta_merged_ordered$strain,
-    condition = meta_merged_ordered$condition,
-    label     = "merged")
-  cat("Merged matrix (post-correction):", nrow(merged_expr), "genes x",
-      ncol(merged_expr), "cells\n")
+    dds_clarke <- DESeqDataSetFromMatrix(
+      countData = vaf_cnt_round,
+      colData   = clarke_col_data,
+      design    = ~ condition
+    )
+    dds_clarke <- estimateSizeFactors(dds_clarke, type="poscounts")
+    vsd_clarke <- varianceStabilizingTransformation(dds_clarke, blind=TRUE)
+    expr_clarke <- assay(vsd_clarke)
+    cat("Clarke VST complete:", nrow(expr_clarke), "genes x",
+        ncol(expr_clarke), "cells\n")
 
-  # (meta_merged already built above before batch correction)
+    # -- Build metadata for Clarke cells -----------------------------------------
+    meta_clarke <- data.frame(
+      cell_id      = clarke_cell_ids,
+      strain       = "Clarke2025",
+      strain_group = "Clarke2025",
+      condition    = clarke_condition,
+      strain_condition = paste0("Clarke2025 ",
+        ifelse(clarke_cd45pos, "CD45pos",
+        ifelse(clarke_cell_ids %in% vaf_ids_c, "VAF", "VRC"))),
+      row.names = clarke_cell_ids,
+      stringsAsFactors = FALSE
+    )
 
-  # -- Color palettes for merged analysis --------------------------------------
-  # Reuse the same dynamic per-group base colors from the combined section
-  # (strain_base_colors), plus a fixed tone for Clarke2025 to keep it visually
-  # distinct from your own strain groups.
-  strain_groups_merged <- c(strain_groups, "Clarke2025")
-  strain_colors_merged <- c(strain_base_colors, Clarke2025 = "#8B6914")
+    # -- Merge your VST with Clarke VST ------------------------------------------
+    common_ens <- intersect(rownames(cmb_expr), rownames(expr_clarke))
+    cat("Common Ensembl IDs for merged matrix:", length(common_ens), "\n")
 
-  sc_palette_merged <- c(
-    sc_palette,
-    "Clarke2025 CD45pos" = "#C49A2A",
-    "Clarke2025 VAF"     = "#6B4F10",
-    "Clarke2025 VRC"     = "#D4A843"
-  )
+    merged_expr_raw <- cbind(cmb_expr[common_ens, ],
+                              expr_clarke[common_ens, ])
+    cat("Merged matrix (pre-correction):", nrow(merged_expr_raw), "genes x",
+        ncol(merged_expr_raw), "cells\n")
 
-  # -- HVG selection and UMAP on merged matrix ---------------------------------
-  cat("Running HVG selection on merged matrix...\n")
-  gv_merged  <- apply(merged_expr, 1, var)
-  hvg_merged <- names(sort(gv_merged, decreasing=TRUE))[
-                  1:min(N_HVG, length(gv_merged))]
-  expr_hvg_m <- merged_expr[hvg_merged, ]
+    # -- Build merged metadata BEFORE batch correction (needed as covariate) ---
+    your_meta_sub <- cmb_meta[, c("cell_id","strain","strain_group",
+                                        "condition","strain_condition")]
+    meta_merged <- rbind(your_meta_sub, meta_clarke[, colnames(your_meta_sub)])
+    rownames(meta_merged) <- meta_merged$cell_id
+    cat("Merged metadata:", nrow(meta_merged), "rows\n")
 
-  cat("Running PCA + UMAP (merged)...\n")
-  umap_merged <- run_umap(expr_hvg_m)
+    # -- Batch correction: limma::removeBatchEffect ----------------------------
+    # Corrects for the between-dataset expression scale difference while
+    # preserving biological variation. Applied only for this merged analysis;
+    # all other outputs use the uncorrected per-plate VST.
+    if (!requireNamespace("limma", quietly=TRUE)) {
+      cat("  Installing limma...\n")
+      if (!requireNamespace("BiocManager", quietly=TRUE))
+        install.packages("BiocManager", repos="https://cloud.r-project.org", quiet=TRUE)
+      BiocManager::install("limma", ask=FALSE, update=FALSE, quiet=TRUE)
+    }
+    suppressPackageStartupMessages(library(limma))
 
-  umap_m_df <- data.frame(umap_merged,
-                            cell_id = rownames(umap_merged),
-                            stringsAsFactors=FALSE) %>%
-    left_join(meta_merged[, c("cell_id","strain","strain_group","condition",
-                              "strain_condition")],
-              by="cell_id")
+    # Batch is now the PLATE, not the dataset. Clarke2025 is itself a plate-level
+    # batch, so this subsumes the old yours-vs-clarke correction rather than
+    # replacing it: correcting per plate necessarily removes the between-dataset
+    # offset too.
+    all_cells_merged    <- colnames(merged_expr_raw)
+    meta_merged_ordered <- meta_merged[all_cells_merged, ]
+    cat("  Batch composition by plate:\n")
+    print(table(meta_merged_ordered$strain))
 
-  # All-gene PCA for Leiden on merged
-  cat("Running all-gene PCA for Leiden clustering (merged)...\n")
-  pca_m_all  <- prcomp(t(merged_expr), center=TRUE, scale.=FALSE)
-  var_m_all  <- pca_m_all$sdev^2 / sum(pca_m_all$sdev^2)
-  cum_m_all  <- cumsum(var_m_all)
-  n_pcs_m    <- max(2, which(cum_m_all >= VAR_THRESHOLD)[1])
-  cat("PCs selected (merged all-gene):", n_pcs_m,
-      sprintf("(%.1f%% variance)\n", cum_m_all[n_pcs_m]*100))
-  pcs_m_all  <- pca_m_all$x[, 1:n_pcs_m, drop=FALSE]
+    merged_expr <- apply_plate_correction(
+      merged_expr_raw,
+      plate     = meta_merged_ordered$strain,
+      condition = meta_merged_ordered$condition,
+      label     = "merged")
+    cat("Merged matrix (post-correction):", nrow(merged_expr), "genes x",
+        ncol(merged_expr), "cells\n")
 
-  cat("Running Leiden clustering (merged)...\n")
-  leiden_m           <- run_leiden(pcs_m_all)
-  umap_m_df$cluster  <- as.character(leiden_m)
-  n_clust_m          <- length(unique(umap_m_df$cluster))
-  umap_m_df$cluster  <- factor(umap_m_df$cluster,
-                                levels=sort(unique(as.integer(umap_m_df$cluster))))
-  cat("Clusters found:", n_clust_m, "\n")
+    # (meta_merged already built above before batch correction)
 
-  cluster_pal_m <- setNames(scales::hue_pal()(n_clust_m),
-                              sort(unique(as.character(umap_m_df$cluster))))
-  cluster_vec_m <- setNames(as.character(umap_m_df$cluster), umap_m_df$cell_id)
+    # -- Color palettes for merged analysis --------------------------------------
+    # Reuse the same dynamic per-group base colors from the combined section
+    # (strain_base_colors), plus a fixed tone for Clarke2025 to keep it visually
+    # distinct from your own strain groups.
+    strain_groups_merged <- c(strain_groups, "Clarke2025")
+    strain_colors_merged <- c(strain_base_colors, Clarke2025 = "#8B6914")
 
-  # Per-cell coordinates + annotation. Without this the UMAP is a picture you
-  # cannot interrogate: asking "which sample are those outlying points from?"
-  # otherwise means re-running the whole script.
-  write.csv(umap_m_df[, c("cell_id","UMAP1","UMAP2","cluster","strain",
-                          "strain_group","condition","strain_condition")],
-            file.path(vaf_out_dir, "umap_coordinates_by_cell.csv"), row.names=FALSE)
-  cat("Saved: umap_coordinates_by_cell.csv (", nrow(umap_m_df), "cells )\n")
+    sc_palette_merged <- c(
+      sc_palette,
+      "Clarke2025 CD45pos" = "#C49A2A",
+      "Clarke2025 VAF"     = "#6B4F10",
+      "Clarke2025 VRC"     = "#D4A843"
+    )
 
-  # -- UMAP 1: by Leiden cluster -----------------------------------------------
-  p_m_clust <- ggplot(umap_m_df, aes(x=UMAP1, y=UMAP2, color=cluster)) +
-    geom_point(size=1.5, alpha=0.85) +
-    scale_color_manual(values=cluster_pal_m) +
-    labs(
-      title    = paste0("Your cells + Clarke 2025 — ",
-                        nrow(umap_m_df), " cells by Leiden cluster"),
-      subtitle = paste0("n=", nrow(umap_m_df),
-                        " | UMAP: top ", N_HVG,
-                        " HVGs | Clusters: all-gene PCA | resolution=",
-                        LEIDEN_RESOLUTION, " | ", n_clust_m, " clusters"),
-      color    = "Cluster"
-    ) +
-    theme_bw(base_size=12) +
-    theme(plot.title=element_text(face="bold", size=12),
-          plot.subtitle=element_text(size=8, color="grey40"),
-          panel.grid.minor=element_blank(), aspect.ratio=1)
+    # -- HVG selection and UMAP on merged matrix ---------------------------------
+    cat("Running HVG selection on merged matrix...\n")
+    gv_merged  <- apply(merged_expr, 1, var)
+    hvg_merged <- names(sort(gv_merged, decreasing=TRUE))[
+                    1:min(N_HVG, length(gv_merged))]
+    expr_hvg_m <- merged_expr[hvg_merged, ]
 
-  ggsave(file.path(vaf_out_dir, "umap_merged_by_cluster.pdf"),
-         p_m_clust, width=7, height=6)
-  cat("Saved: umap_merged_by_cluster.pdf\n")
+    cat("Running PCA + UMAP (merged)...\n")
+    umap_merged <- run_umap(expr_hvg_m)
 
-  # -- UMAP 2: by strain/population --------------------------------------------
-  p_m_strain <- ggplot(umap_m_df,
-                        aes(x=UMAP1, y=UMAP2, fill=strain_condition)) +
-    geom_point(size=1.0, alpha=1.0, stroke=0.2, shape=21,
-               aes(fill=strain_condition), color="grey20") +
-    scale_fill_manual(values=sc_palette_merged,
-                      na.value="grey60") +
-    labs(
-      title    = paste0("Your cells + Clarke 2025 — ",
-                        nrow(umap_m_df), " cells by strain & population"),
-      subtitle = paste0(length(strain_groups_merged), " strain groups x conditions"),
-      fill     = "Strain / Population"
-    ) +
-    guides(fill=guide_legend(ncol=2, override.aes=list(size=3, stroke=0.3))) +
-    theme_bw(base_size=12) +
-    theme(plot.title=element_text(face="bold", size=12),
-          plot.subtitle=element_text(size=9, color="grey40"),
-          panel.grid.minor=element_blank(),
-          legend.text=element_text(size=7), aspect.ratio=1)
+    umap_m_df <- data.frame(umap_merged,
+                              cell_id = rownames(umap_merged),
+                              stringsAsFactors=FALSE) %>%
+      left_join(meta_merged[, c("cell_id","strain","strain_group","condition",
+                                "strain_condition")],
+                by="cell_id")
 
-  ggsave(file.path(vaf_out_dir, "umap_merged_by_strain_population.pdf"),
-         p_m_strain, width=8, height=6)
-  cat("Saved: umap_merged_by_strain_population.pdf\n")
+    # All-gene PCA for Leiden on merged
+    cat("Running all-gene PCA for Leiden clustering (merged)...\n")
+    pca_m_all  <- prcomp(t(merged_expr), center=TRUE, scale.=FALSE)
+    var_m_all  <- pca_m_all$sdev^2 / sum(pca_m_all$sdev^2)
+    cum_m_all  <- cumsum(var_m_all)
+    n_pcs_m    <- max(2, which(cum_m_all >= VAR_THRESHOLD)[1])
+    cat("PCs selected (merged all-gene):", n_pcs_m,
+        sprintf("(%.1f%% variance)\n", cum_m_all[n_pcs_m]*100))
+    pcs_m_all  <- pca_m_all$x[, 1:n_pcs_m, drop=FALSE]
 
-  # -- Per-strain-group panels on merged UMAP ----------------------------------
-  all_strains_merged <- strain_groups_merged
-  strain_panels_m <- lapply(all_strains_merged, function(st) {
-    st_cells <- umap_m_df$cell_id[umap_m_df$strain_group == st]
-    df_fg    <- umap_m_df %>% filter(cell_id %in% st_cells)
-    df_bg    <- umap_m_df %>% filter(!cell_id %in% st_cells)
-    ggplot() +
-      geom_point(data=df_bg, aes(x=UMAP1, y=UMAP2),
-                 color="grey88", size=0.9, alpha=0.5) +
-      geom_point(data=df_fg, aes(x=UMAP1, y=UMAP2, color=cluster),
-                 size=1.6, alpha=0.9) +
+    cat("Running Leiden clustering (merged)...\n")
+    leiden_m           <- run_leiden(pcs_m_all)
+    umap_m_df$cluster  <- as.character(leiden_m)
+    n_clust_m          <- length(unique(umap_m_df$cluster))
+    umap_m_df$cluster  <- factor(umap_m_df$cluster,
+                                  levels=sort(unique(as.integer(umap_m_df$cluster))))
+    cat("Clusters found:", n_clust_m, "\n")
+
+    cluster_pal_m <- setNames(scales::hue_pal()(n_clust_m),
+                                sort(unique(as.character(umap_m_df$cluster))))
+    cluster_vec_m <- setNames(as.character(umap_m_df$cluster), umap_m_df$cell_id)
+
+    # Per-cell coordinates + annotation. Without this the UMAP is a picture you
+    # cannot interrogate: asking "which sample are those outlying points from?"
+    # otherwise means re-running the whole script.
+    write.csv(umap_m_df[, c("cell_id","UMAP1","UMAP2","cluster","strain",
+                            "strain_group","condition","strain_condition")],
+              file.path(vaf_out_dir, "umap_coordinates_by_cell.csv"), row.names=FALSE)
+    cat("Saved: umap_coordinates_by_cell.csv (", nrow(umap_m_df), "cells )\n")
+
+    # -- UMAP 1: by Leiden cluster -----------------------------------------------
+    p_m_clust <- ggplot(umap_m_df, aes(x=UMAP1, y=UMAP2, color=cluster)) +
+      geom_point(size=1.5, alpha=0.85) +
       scale_color_manual(values=cluster_pal_m) +
-      labs(title=paste0(st, " (n=", nrow(df_fg), ")"),
-           x="UMAP1", y="UMAP2", color="Cluster") +
-      coord_fixed() +
-      theme_bw(base_size=11) +
-      theme(plot.title=element_text(face="bold", size=11),
+      labs(
+        title    = paste0("Your cells + Clarke 2025 — ",
+                          nrow(umap_m_df), " cells by Leiden cluster"),
+        subtitle = paste0("n=", nrow(umap_m_df),
+                          " | UMAP: top ", N_HVG,
+                          " HVGs | Clusters: all-gene PCA | resolution=",
+                          LEIDEN_RESOLUTION, " | ", n_clust_m, " clusters"),
+        color    = "Cluster"
+      ) +
+      theme_bw(base_size=12) +
+      theme(plot.title=element_text(face="bold", size=12),
+            plot.subtitle=element_text(size=8, color="grey40"),
+            panel.grid.minor=element_blank(), aspect.ratio=1)
+
+    ggsave(file.path(vaf_out_dir, "umap_merged_by_cluster.pdf"),
+           p_m_clust, width=7, height=6)
+    cat("Saved: umap_merged_by_cluster.pdf\n")
+
+    # -- UMAP 2: by strain/population --------------------------------------------
+    p_m_strain <- ggplot(umap_m_df,
+                          aes(x=UMAP1, y=UMAP2, fill=strain_condition)) +
+      geom_point(size=1.0, alpha=1.0, stroke=0.2, shape=21,
+                 aes(fill=strain_condition), color="grey20") +
+      scale_fill_manual(values=sc_palette_merged,
+                        na.value="grey60") +
+      labs(
+        title    = paste0("Your cells + Clarke 2025 — ",
+                          nrow(umap_m_df), " cells by strain & population"),
+        subtitle = paste0(length(strain_groups_merged), " strain groups x conditions"),
+        fill     = "Strain / Population"
+      ) +
+      guides(fill=guide_legend(ncol=2, override.aes=list(size=3, stroke=0.3))) +
+      theme_bw(base_size=12) +
+      theme(plot.title=element_text(face="bold", size=12),
+            plot.subtitle=element_text(size=9, color="grey40"),
             panel.grid.minor=element_blank(),
-            legend.text=element_text(size=8))
-  })
-  panels_m_combined <- wrap_plots(strain_panels_m, ncol=1) +
-    plot_annotation(
-      title    = "Per-strain-group cells on merged UMAP (your cells + Clarke 2025)",
-      subtitle = paste0("Merged Leiden clusters | resolution=", LEIDEN_RESOLUTION,
-                        " | grey = other strain groups"),
-      theme    = theme(plot.title=element_text(face="bold", size=13),
-                       plot.subtitle=element_text(size=9, color="grey40"))
-    )
-  ggsave(file.path(vaf_out_dir, "umap_per_strain_on_merged.pdf"),
-         panels_m_combined,
-         width=7, height=6 * length(all_strains_merged))
-  cat("Saved: umap_per_strain_on_merged.pdf\n")
+            legend.text=element_text(size=7), aspect.ratio=1)
 
-  # -- Bar charts (cluster composition) ----------------------------------------
-  cat("Generating merged cluster bar charts...\n")
-  umap_m_df$condition_clean  <- clean_label(umap_m_df$condition)
-  umap_m_df$condition_clean  <- ifelse(
-    umap_m_df$strain_group == "Clarke2025",
-    umap_m_df$strain_condition,
-    umap_m_df$condition_clean)
+    ggsave(file.path(vaf_out_dir, "umap_merged_by_strain_population.pdf"),
+           p_m_strain, width=8, height=6)
+    cat("Saved: umap_merged_by_strain_population.pdf\n")
 
-  make_label_df_m <- function(df, fill_var, type) {
-    df %>%
-      group_by(cluster, .data[[fill_var]]) %>%
-      summarise(n=n(), .groups="drop") %>%
-      group_by(cluster) %>%
-      mutate(total=sum(n), prop=n/total,
-             label_count=ifelse(prop>=MIN_LABEL_PROP, as.character(n), ""),
-             label_prop =ifelse(prop>=MIN_LABEL_PROP,
-                                paste0(round(prop*100), "%"), ""),
-             y_pos=cumsum(if(type=="count") n else prop) -
-                   0.5*(if(type=="count") n else prop)) %>%
-      ungroup()
-  }
-
-  lab_sc_c <- make_label_df_m(umap_m_df, "strain_condition", "count")
-  lab_sc_p <- make_label_df_m(umap_m_df, "strain_condition", "prop")
-  lab_s_c  <- make_label_df_m(umap_m_df, "strain_group",     "count")
-  lab_s_p  <- make_label_df_m(umap_m_df, "strain_group",     "prop")
-
-  mk_bar <- function(lab, fill_var, pal, y_var, y_lab, title_str, prop=FALSE) {
-    # Use pre-computed label column based on prop flag
-    lab$bar_label <- if (isTRUE(prop)) lab$label_prop else lab$label_count
-    p <- ggplot(lab, aes(x=cluster, y=.data[[y_var]], fill=.data[[fill_var]])) +
-      geom_bar(stat="identity", position="stack", color="white", linewidth=0.15) +
-      geom_text(aes(y=y_pos, label=bar_label),
-                size=2.5, color="white", fontface="bold") +
-      scale_fill_manual(values=pal, na.value="grey60") +
-      labs(title=title_str, x="Cluster",
-           y=y_lab, fill=sub(" —.*","",title_str)) +
-      theme_bw(base_size=10) +
-      theme(plot.title=element_text(face="bold", size=10),
-            panel.grid.minor=element_blank(),
-            legend.text=element_text(size=7),
-            legend.key.size=unit(0.4,"cm"))
-    if (isTRUE(prop)) p <- p + scale_y_continuous(labels=scales::percent_format())
-    p
-  }
-
-  p_b1 <- mk_bar(lab_sc_c, "strain_condition", sc_palette_merged,
-                  "n",    "Cell count",       "Strain & population — counts")
-  p_b2 <- mk_bar(lab_sc_p, "strain_condition", sc_palette_merged,
-                  "prop", "Proportion",       "Strain & population — proportions",
-                  prop=TRUE)
-  p_b3 <- mk_bar(lab_s_c,  "strain_group",     strain_colors_merged,
-                  "n",    "Cell count",       "Strain — counts")
-  p_b4 <- mk_bar(lab_s_p,  "strain_group",     strain_colors_merged,
-                  "prop", "Proportion",       "Strain — proportions", prop=TRUE)
-
-  bar_m <- (p_b1 | p_b2) / (p_b3 | p_b4) +
-    plot_annotation(
-      title    = paste0("Merged cluster composition — ", n_clust_m,
-                        " clusters | n=", nrow(umap_m_df), " cells"),
-      subtitle = paste0("Labels shown for segments >= ", MIN_LABEL_PROP*100,
-                        "% of bar"),
-      theme    = theme(plot.title=element_text(face="bold", size=14),
-                       plot.subtitle=element_text(size=9, color="grey40"))
-    )
-  ggsave(file.path(vaf_out_dir, "barplots_cluster_composition.pdf"),
-         bar_m, width=20, height=14)
-  cat("Saved: barplots_cluster_composition.pdf\n")
-
-  # -- Cluster marker genes (Wilcoxon on merged VST) ---------------------------
-  cat("Running Wilcoxon marker gene analysis on merged clusters...\n")
-  cluster_levels_m <- sort(unique(as.integer(as.character(umap_m_df$cluster))))
-  all_markers_m    <- list()
-  wb_m             <- createWorkbook()
-
-  summary_m <- umap_m_df %>%
-    group_by(cluster, strain, condition_clean) %>%
-    summarise(n_cells=n(), .groups="drop") %>%
-    arrange(as.integer(as.character(cluster)), strain, condition_clean)
-  addWorksheet(wb_m, "Summary"); writeData(wb_m, "Summary", summary_m)
-
-  for (cl in cluster_levels_m) {
-    cl_label   <- as.character(cl)
-    cl_cells   <- names(cluster_vec_m)[cluster_vec_m == cl_label]
-    rest_cells <- names(cluster_vec_m)[cluster_vec_m != cl_label]
-    mean_cl    <- rowMeans(merged_expr[, cl_cells,   drop=FALSE])
-    mean_rest  <- rowMeans(merged_expr[, rest_cells, drop=FALSE])
-    log2fc     <- mean_cl - mean_rest
-    candidates <- names(log2fc)[log2fc >= MIN_LOG2FC]
-    if (length(candidates) < 2) { all_markers_m[[cl_label]] <- data.frame(); next }
-    pv <- sapply(candidates, function(g)
-           wilcox.test(merged_expr[g, cl_cells], merged_expr[g, rest_cells],
-                       alternative="greater", exact=FALSE)$p.value)
-    pa <- p.adjust(pv, method="BH")
-    res_m <- data.frame(
-      ensembl_id=candidates, gene_symbol=to_sym(candidates),
-      mean_VST_cluster=round(mean_cl[candidates],4),
-      mean_VST_rest=round(mean_rest[candidates],4),
-      log2FC=round(log2fc[candidates],4),
-      pval=signif(pv,4), padj=signif(pa,4),
-      stringsAsFactors=FALSE) %>%
-      filter(padj < MAX_PADJ) %>%
-      arrange(desc(log2FC)) %>%
-      distinct(gene_symbol, .keep_all=TRUE) %>%
-      slice_head(n=TOP_EXCEL) %>%
-      mutate(rank=row_number()) %>%
-      select(rank,ensembl_id,gene_symbol,mean_VST_cluster,mean_VST_rest,
-             log2FC,pval,padj)
-    all_markers_m[[cl_label]] <- res_m
-    sn <- paste0("Cluster_", cl_label)
-    addWorksheet(wb_m, sn); writeData(wb_m, sn, res_m)
-    addStyle(wb_m, sn, style=createStyle(textDecoration="bold",fgFill="#D9E1F2"),
-             rows=1, cols=1:8, gridExpand=TRUE)
-    setColWidths(wb_m, sn, cols=1:8, widths=c(6,20,16,16,14,10,12,12))
-  }
-  markers_m_path <- file.path(vaf_out_dir, "cluster_marker_genes.xlsx")
-  saveWorkbook(wb_m, markers_m_path, overwrite=TRUE)
-  cat("Saved: cluster_marker_genes.xlsx\n")
-
-  # ============================================================================
-  # Pairwise cluster contrasts vs the VAF and VRC reference clusters
-  # ============================================================================
-  # The block above is one-vs-REST and one-sided (alternative="greater", with
-  # candidates pre-filtered to log2FC >= MIN_LOG2FC). That answers "what marks
-  # this cluster against all others pooled" — which dilutes a targeted
-  # comparison and cannot report depletion at all.
-  #
-  # This block answers the different question: for an uncharacterized cluster,
-  # what is up AND down relative specifically to the VAF cluster and to the VRC
-  # cluster? Depletion matters here — a cluster lacking both Col1a1 and Pecam1
-  # is evidence it is neither fibroblast nor endothelial, and the one-vs-rest
-  # output structurally cannot show that.
-  cat("\nRunning pairwise cluster contrasts vs VAF / VRC reference clusters...\n")
-
-  # -- Identify the reference clusters from Clarke cell membership -------------
-  # Derived each run rather than hardcoded: Leiden cluster IDs are not stable
-  # across runs whose plate roster or gene set changed, so a literal
-  # "VAF_CLUSTER <- 3" would silently rot.
-  modal_cluster <- function(ids, label) {
-    ids <- intersect(ids, names(cluster_vec_m))
-    if (length(ids) == 0) return(NA_character_)
-    tb <- table(cluster_vec_m[ids])
-    winner <- names(tb)[which.max(tb)]
-    cat(sprintf("  %s reference: cluster %s (%d/%d cells, %.1f%%)\n",
-                label, winner, max(tb), length(ids),
-                100 * max(tb) / length(ids)))
-    winner
-  }
-  vaf_ref_cl <- modal_cluster(vaf_ids_c, "VAF")
-  vrc_ref_cl <- modal_cluster(vrc_ids_c, "VRC")
-
-  if (is.na(vaf_ref_cl) || is.na(vrc_ref_cl)) {
-    cat("  Could not locate VAF/VRC reference clusters — skipping pairwise.\n")
-  } else if (vaf_ref_cl == vrc_ref_cl) {
-    cat("  WARNING: VAF and VRC reference cells share cluster", vaf_ref_cl,
-        "- the merged clustering does not separate them. Skipping pairwise.\n")
-  } else {
-    wb_pw <- createWorkbook()
-    pw_summary <- data.frame(
-      contrast=character(), n_query=integer(), n_reference=integer(),
-      n_up=integer(), n_down=integer(), stringsAsFactors=FALSE)
-
-    # Every cluster except the reference itself, tested against each reference.
-    refs <- c(VAF=vaf_ref_cl, VRC=vrc_ref_cl)
-    for (ref_name in names(refs)) {
-      ref_cl <- refs[[ref_name]]
-      for (q_cl in as.character(cluster_levels_m)) {
-        if (q_cl == ref_cl) next
-        q_cells <- names(cluster_vec_m)[cluster_vec_m == q_cl]
-        r_cells <- names(cluster_vec_m)[cluster_vec_m == ref_cl]
-        if (length(q_cells) < 3 || length(r_cells) < 3) {
-          cat("    Cluster", q_cl, "vs", ref_name, "- too few cells, skipped\n")
-          next
-        }
-
-        mean_q <- rowMeans(merged_expr[, q_cells, drop=FALSE])
-        mean_r <- rowMeans(merged_expr[, r_cells, drop=FALSE])
-        l2fc   <- mean_q - mean_r          # VST difference == log2 fold change
-
-        # Two-sided, and NOT pre-filtered by direction: keep any gene with a
-        # meaningful shift either way so depletion survives to the output.
-        cand <- names(l2fc)[abs(l2fc) >= MIN_LOG2FC]
-        if (length(cand) < 2) {
-          cat("    Cluster", q_cl, "vs", ref_name, "- no candidate genes\n")
-          next
-        }
-        pv <- sapply(cand, function(g)
-                wilcox.test(merged_expr[g, q_cells], merged_expr[g, r_cells],
-                            exact=FALSE)$p.value)          # two-sided
-        pa <- p.adjust(pv, method="BH")
-
-        res_pw <- data.frame(
-          ensembl_id       = cand,
-          gene_symbol      = to_sym(cand),
-          mean_VST_query   = round(mean_q[cand], 4),
-          mean_VST_ref     = round(mean_r[cand], 4),
-          log2FC           = round(l2fc[cand], 4),
-          direction        = ifelse(l2fc[cand] > 0, "up_in_query",
-                                                    "down_in_query"),
-          pval             = signif(pv, 4),
-          padj             = signif(pa, 4),
-          stringsAsFactors = FALSE) %>%
-          filter(padj < MAX_PADJ) %>%
-          arrange(desc(abs(log2FC))) %>%
-          distinct(gene_symbol, .keep_all=TRUE)
-
-        n_up   <- sum(res_pw$direction == "up_in_query")
-        n_down <- sum(res_pw$direction == "down_in_query")
-        cat(sprintf("    Cluster %s vs %s (cluster %s): %d up, %d down\n",
-                    q_cl, ref_name, ref_cl, n_up, n_down))
-
-        sn_pw <- paste0("C", q_cl, "_vs_", ref_name)
-        addWorksheet(wb_pw, sn_pw)
-        writeData(wb_pw, sn_pw, res_pw)
-        addStyle(wb_pw, sn_pw,
-                 style=createStyle(textDecoration="bold", fgFill="#D9E1F2"),
-                 rows=1, cols=1:8, gridExpand=TRUE)
-        setColWidths(wb_pw, sn_pw, cols=1:8,
-                     widths=c(20,16,16,14,10,14,12,12))
-        pw_summary <- rbind(pw_summary, data.frame(
-          contrast=sn_pw, n_query=length(q_cells), n_reference=length(r_cells),
-          n_up=n_up, n_down=n_down, stringsAsFactors=FALSE))
-      }
-    }
-
-    notes_pw <- data.frame(Note=c(
-      paste0("Pairwise Wilcoxon contrasts on merged batch-corrected VST. ",
-             "Two-sided; both enrichment and depletion reported."),
-      paste0("VAF reference = cluster ", vaf_ref_cl,
-             "; VRC reference = cluster ", vrc_ref_cl,
-             " (assigned from Clarke 2025 cell membership this run)."),
-      paste0("log2FC = mean VST(query) - mean VST(reference). ",
-             "Positive = up in query cluster."),
-      paste0("Thresholds: |log2FC| >= ", MIN_LOG2FC, ", BH padj < ", MAX_PADJ, "."),
-      paste0("Cluster IDs are re-derived every run and are NOT comparable ",
-             "across runs with a different plate roster or gene set."),
-      paste0("Distinct from cluster_marker_genes.xlsx, which is one-vs-rest ",
-             "and upregulated-only.")), stringsAsFactors=FALSE)
-    addWorksheet(wb_pw, "Notes");   writeData(wb_pw, "Notes", notes_pw)
-    setColWidths(wb_pw, "Notes", cols=1, widths=110)
-    addWorksheet(wb_pw, "Summary"); writeData(wb_pw, "Summary", pw_summary)
-    setColWidths(wb_pw, "Summary", cols=1:5, widths=c(18,10,14,8,8))
-
-    saveWorkbook(wb_pw, file.path(vaf_out_dir, "cluster_pairwise_contrasts.xlsx"),
-                 overwrite=TRUE)
-    cat("Saved: cluster_pairwise_contrasts.xlsx\n")
-  }
-
-  # -- Heatmap -----------------------------------------------------------------
-  cat("Generating merged cluster marker heatmap...\n")
-  hm_genes_m <- c()
-  for (cl_label in as.character(cluster_levels_m)) {
-    if (!is.null(all_markers_m[[cl_label]]) &&
-        nrow(all_markers_m[[cl_label]]) > 0) {
-      top_g <- all_markers_m[[cl_label]]$gene_symbol[
-                 !all_markers_m[[cl_label]]$gene_symbol %in% hm_genes_m]
-      hm_genes_m <- c(hm_genes_m, head(top_g, TOP_HEATMAP))
-    }
-  }
-  cat("Heatmap genes:", length(hm_genes_m), "\n")
-  sym_to_ens_m  <- setNames(names(sym_map), sym_map)
-  hm_ens_m      <- sym_to_ens_m[hm_genes_m]
-  hm_ens_m      <- hm_ens_m[!is.na(hm_ens_m) & hm_ens_m %in% rownames(merged_expr)]
-  cell_ord_m    <- umap_m_df$cell_id[order(as.integer(
-                     as.character(umap_m_df$cluster)))]
-  expr_hm_m     <- merged_expr[hm_ens_m, cell_ord_m]
-  rownames(expr_hm_m) <- to_sym(rownames(expr_hm_m))
-  expr_z_m      <- t(scale(t(expr_hm_m)))
-  expr_z_m[expr_z_m >  2.5] <-  2.5
-  expr_z_m[expr_z_m < -2.5] <- -2.5
-  clust_anno_m  <- as.character(umap_m_df$cluster[
-                     match(cell_ord_m, umap_m_df$cell_id)])
-  ha_m <- HeatmapAnnotation(
-    Cluster=clust_anno_m,
-    col=list(Cluster=cluster_pal_m),
-    annotation_name_side="left"
-  )
-  col_fun_m <- colorRamp2(c(-2.5,0,2.5), c("#3D0751","#1A1A1A","#F5E642"))
-  ht_m <- Heatmap(
-    expr_z_m, name="Z-score", col=col_fun_m,
-    top_annotation=ha_m,
-    show_column_names=FALSE, show_row_names=TRUE,
-    row_names_gp=gpar(fontsize=7, fontface="italic"),
-    cluster_rows=FALSE, cluster_columns=FALSE,
-    column_title=paste0("Merged cluster marker genes — ",
-                         length(hm_genes_m), " genes x ", ncol(expr_z_m), " cells"),
-    column_title_gp=gpar(fontsize=12, fontface="bold"),
-    use_raster=TRUE, raster_quality=5, raster_device=HT_RASTER_DEVICE
-  )
-  hm_path_m <- file.path(vaf_out_dir, "heatmap_cluster_markers.pdf")
-  pdf(hm_path_m, width=18,
-      height=max(8, length(hm_genes_m)*0.18+3))
-  draw(ht_m, heatmap_legend_side="right", annotation_legend_side="bottom")
-  dev.off()
-  cat("Saved: heatmap_cluster_markers.pdf\n")
-
-  # -- Cluster violin plots ----------------------------------------------------
-  cat("Generating merged cluster violin plots...\n")
-  # Unlike the combined violins above, these CANNOT fall back to the per-plate
-  # VST matrices: merged_expr is limma batch-corrected across your cells +
-  # Clarke, so splicing in an uncorrected per-plate value would put two
-  # different scales on one axis. A gene missing here is genuinely
-  # unplottable in the merged space, so the panel is skipped with a reason
-  # rather than silently omitted or crashed on.
-  vln_ens_m <- sym_to_ens_m[VIOLIN_GENES]
-  vln_ens_m <- vln_ens_m[!is.na(vln_ens_m) & vln_ens_m %in% rownames(merged_expr)]
-
-  dropped_m <- setdiff(VIOLIN_GENES, names(vln_ens_m))
-  if (length(dropped_m) > 0) {
-    cat("  Not plottable in merged space:", paste(dropped_m, collapse=", "), "\n")
-    cat("  (merged_expr keeps only genes shared by every plate AND Clarke;\n")
-    cat("   e.g. Ptprc has 0 counts in NODCD31, so it leaves the intersection.)\n")
-  }
-
-  if (length(vln_ens_m) == 0) {
-    cat("  No violin genes available in merged matrix — skipping merged violins.\n")
-  } else {
-
-  vln_m_df <- as.data.frame(t(merged_expr[vln_ens_m, umap_m_df$cell_id,
-                                            drop=FALSE])) %>%
-    tibble::rownames_to_column("cell_id") %>%
-    left_join(umap_m_df[, c("cell_id","cluster")], by="cell_id") %>%
-    pivot_longer(-c(cell_id,cluster), names_to="ensembl_id", values_to="VST") %>%
-    mutate(gene_symbol=to_sym(ensembl_id),
-           cluster=factor(cluster,
-                           levels=sort(unique(as.integer(
-                             as.character(umap_m_df$cluster))))))
-
-  vln_m_plots <- lapply(seq_along(vln_ens_m), function(i) {
-    ens <- vln_ens_m[i]; sym <- names(vln_ens_m)[i]
-    df_g <- vln_m_df %>% filter(ensembl_id == ens)
-    ggplot(df_g, aes(x=cluster, y=VST, fill=cluster)) +
-      geom_violin(trim=TRUE, scale="width", alpha=0.85, linewidth=0.3) +
-      geom_jitter(width=0.15, size=0.6, alpha=0.35, color="grey20") +
-      scale_fill_manual(values=cluster_pal_m) +
-      labs(title=sym, x="Leiden Cluster", y="VST expression") +
-      theme_bw(base_size=11) +
-      theme(plot.title=element_text(face="bold.italic", size=11),
-            legend.position="none", panel.grid.minor=element_blank())
-  })
-  n_vln_m   <- length(vln_m_plots)
-  vln_m_panel <- wrap_plots(vln_m_plots, ncol=min(3, n_vln_m)) +
-    plot_annotation(
-      title    = "Gene expression across merged Leiden clusters",
-      subtitle = paste0("VST-normalized | n=", nrow(umap_m_df),
-                        " cells (your data + Clarke 2025)"),
-      theme    = theme(plot.title=element_text(face="bold", size=13),
-                       plot.subtitle=element_text(size=9, color="grey40"))
-    )
-  ggsave(file.path(vaf_out_dir, "violin_plots_by_cluster.pdf"),
-         vln_m_panel,
-         width=min(3,n_vln_m)*5, height=ceiling(n_vln_m/3)*5)
-  cat("Saved: violin_plots_by_cluster.pdf\n")
-  }
-
-  # -- VAF/VRC correlation on merged clusters ----------------------------------
-  cat("Running VAF/VRC correlation on merged clusters...\n")
-  # Reuse ref_profiles from earlier VAF/VRC block if available
-  if (exists("ref_profiles")) {
-    your_sym_merged   <- to_sym(rownames(merged_expr))
-    common_m_vaf      <- intersect(your_sym_merged, names(ref_profiles[["VAF"]]))
-    your_idx_m        <- which(your_sym_merged %in% common_m_vaf)
-    your_syms_m       <- your_sym_merged[your_idx_m]
-    wb_vaf_m          <- createWorkbook()
-    summary_vaf_m     <- NULL
-    for (cl_label in as.character(cluster_levels_m)) {
-      cl_cells_m <- names(cluster_vec_m)[cluster_vec_m == cl_label]
-      your_mean_m <- rowMeans(merged_expr[your_idx_m, cl_cells_m, drop=FALSE])
-      names(your_mean_m) <- your_syms_m
-      cl_corrs_m <- data.frame(reference_population=character(),
-                                pearson_r=numeric(), spearman_rho=numeric(),
-                                n_genes=integer(), stringsAsFactors=FALSE)
-      for (ref_name in names(ref_profiles)) {
-        ref_v  <- ref_profiles[[ref_name]]
-        common <- intersect(names(your_mean_m), names(ref_v))
-        if (length(common) < 50) next
-        cl_corrs_m <- rbind(cl_corrs_m, data.frame(
-          reference_population=ref_name,
-          pearson_r=round(cor(your_mean_m[common], ref_v[common], method="pearson"),4),
-          spearman_rho=round(cor(your_mean_m[common], ref_v[common], method="spearman"),4),
-          n_genes=length(common), stringsAsFactors=FALSE))
-      }
-      summary_vaf_m <- rbind(summary_vaf_m,
-                             summarise_best_match(cl_label, cl_corrs_m))
-      sn_m <- paste0("Cluster_", cl_label)
-      addWorksheet(wb_vaf_m, sn_m); writeData(wb_vaf_m, sn_m, cl_corrs_m)
-      addStyle(wb_vaf_m, sn_m,
-               style=createStyle(textDecoration="bold", fgFill="#E2EFDA"),
-               rows=1, cols=1:4, gridExpand=TRUE)
-      if (nrow(cl_corrs_m) > 0) {
-        best_idx_m <- which.max(cl_corrs_m$pearson_r) + 1
-        addStyle(wb_vaf_m, sn_m, style=createStyle(fgFill="#C6EFCE"),
-                 rows=best_idx_m, cols=1:4, gridExpand=TRUE)
-      }
-      setColWidths(wb_vaf_m, sn_m, cols=1:4, widths=c(22,12,14,10))
-    }
-    addWorksheet(wb_vaf_m, "Summary"); writeData(wb_vaf_m, "Summary", summary_vaf_m)
-    addStyle(wb_vaf_m, "Summary",
-             style=createStyle(textDecoration="bold", fgFill="#E2EFDA"),
-             rows=1, cols=1:9, gridExpand=TRUE)
-    setColWidths(wb_vaf_m, "Summary", cols=1:9,
-                 widths=c(10,16,11,15,17,16,12,10,42))
-    # Grey out any cluster whose call did not clear both tests.
-    if (!is.null(summary_vaf_m) && any(!summary_vaf_m$confident)) {
-      addStyle(wb_vaf_m, "Summary", style=createStyle(fontColour="#9C0006",
-               fgFill="#FFC7CE"),
-               rows=which(!summary_vaf_m$confident) + 1, cols=1:9,
-               gridExpand=TRUE)
-    }
-    addWorksheet(wb_vaf_m, "Notes")
-    writeData(wb_vaf_m, "Notes", data.frame(Note=c(
-      paste0("best_match is reported only when the winning Pearson r >= ", MIN_CORR_R,
-             " AND it beats the runner-up by >= ", MIN_CORR_MARGIN,
-             ". Otherwise best_match is 'unresolved' and why_unresolved says which test failed."),
-      "The per-cluster sheets carry every raw correlation regardless; nothing is hidden by this rule.",
-      paste0("REFERENCE CONSTRUCTION: GSE292898 ships no cell-type labels, only the ",
-             "CD45-/HLA-DR+ sort gate, so the three populations are inferred, not published. "),
-      if (exists("REF_SOURCE_NOTE")) REF_SOURCE_NOTE else "Reference source not recorded.",
-      paste0("MAJOR CAVEAT -- 'VAF' IS NOT FIBROBLAST. In the reference centroids actually used ",
-             "by this run, every fibroblast marker is absent from the VAF profile (mean VST ",
-             "Col1a1 -2.9, Col1a2 -1.5, Pdgfra -3.3, Dcn -3.0, Lum -3.3) while every islet-endocrine ",
-             "marker is strongly positive (Gcg 9.7, Ins2 9.0, Pcsk2 8.0, Chga 7.6). Read a VAF match ",
-             "as 'resembles Clarke's CD45- non-endothelial cells', which are predominantly endocrine -- ",
-             "NOT as evidence of fibroblast identity. Clarke et al. themselves report they could not ",
-             "determine a convincing embryologic origin for this population."),
-      paste0("By contrast CD45pos (Ptprc 7.9) and VRC (Pecam1 9.9, Cdh5 8.7, Plvap 13.9) are ",
-             "cleanly identified by their canonical markers and can be read at face value."),
-      "Cluster IDs are re-derived every run and are NOT comparable across runs with a different cell or gene set."),
-      stringsAsFactors=FALSE))
-    setColWidths(wb_vaf_m, "Notes", cols=1, widths=120)
-
-    # -- CD45- MHCII+ cluster distribution --------------------------------------
-    # Where does each CD45- MHCII+ cell land, cluster-wise, per strain?
-    # The CD45+ MHCII+ normalization/reference wells are excluded, as are the
-    # Clarke CD45pos cells. Clarke VAF/VRC are kept as labeled reference rows.
-    # Exclusion is by the CD45 gate, not by "is the reference": NODCD31's
-    # baseline (CD31-) is a CD45- population and belongs in this table.
-    cat("Building CD45- MHCII+ cluster distribution sheet...\n")
-
-    cd45neg_m_df <- umap_m_df %>%
-      filter(is_cd45neg(condition)) %>%
-      mutate(
-        row_strain = ifelse(strain_group == "Clarke2025",
-                            "Clarke2025 (ref)", strain),
-        subgate    = ifelse(strain_group == "Clarke2025",
-                            sub("^Clarke2025 ", "", strain_condition),
-                            sub("^CD45neg_", "", condition))
+    # -- Per-strain-group panels on merged UMAP ----------------------------------
+    all_strains_merged <- strain_groups_merged
+    strain_panels_m <- lapply(all_strains_merged, function(st) {
+      st_cells <- umap_m_df$cell_id[umap_m_df$strain_group == st]
+      df_fg    <- umap_m_df %>% filter(cell_id %in% st_cells)
+      df_bg    <- umap_m_df %>% filter(!cell_id %in% st_cells)
+      ggplot() +
+        geom_point(data=df_bg, aes(x=UMAP1, y=UMAP2),
+                   color="grey88", size=0.9, alpha=0.5) +
+        geom_point(data=df_fg, aes(x=UMAP1, y=UMAP2, color=cluster),
+                   size=1.6, alpha=0.9) +
+        scale_color_manual(values=cluster_pal_m) +
+        labs(title=paste0(st, " (n=", nrow(df_fg), ")"),
+             x="UMAP1", y="UMAP2", color="Cluster") +
+        coord_fixed() +
+        theme_bw(base_size=11) +
+        theme(plot.title=element_text(face="bold", size=11),
+              panel.grid.minor=element_blank(),
+              legend.text=element_text(size=8))
+    })
+    panels_m_combined <- wrap_plots(strain_panels_m, ncol=1) +
+      plot_annotation(
+        title    = "Per-strain-group cells on merged UMAP (your cells + Clarke 2025)",
+        subtitle = paste0("Merged Leiden clusters | resolution=", LEIDEN_RESOLUTION,
+                          " | grey = other strain groups"),
+        theme    = theme(plot.title=element_text(face="bold", size=13),
+                         plot.subtitle=element_text(size=9, color="grey40"))
       )
+    ggsave(file.path(vaf_out_dir, "umap_per_strain_on_merged.pdf"),
+           panels_m_combined,
+           width=7, height=6 * length(all_strains_merged))
+    cat("Saved: umap_per_strain_on_merged.pdf\n")
 
-    cl_cols_cd <- paste0("Cluster_", as.character(cluster_levels_m))
+    # -- Bar charts (cluster composition) ----------------------------------------
+    cat("Generating merged cluster bar charts...\n")
+    umap_m_df$condition_clean  <- clean_label(umap_m_df$condition)
+    umap_m_df$condition_clean  <- ifelse(
+      umap_m_df$strain_group == "Clarke2025",
+      umap_m_df$strain_condition,
+      umap_m_df$condition_clean)
 
-    # Wide count table + an "All CD45- cells" column-total row
-    mk_wide_cd <- function(df, keys) {
-      w <- df %>%
-        group_by(across(all_of(keys)), cluster) %>%
+    make_label_df_m <- function(df, fill_var, type) {
+      df %>%
+        group_by(cluster, .data[[fill_var]]) %>%
         summarise(n=n(), .groups="drop") %>%
-        mutate(cluster=paste0("Cluster_", as.character(cluster))) %>%
-        pivot_wider(names_from=cluster, values_from=n, values_fill=0) %>%
-        as.data.frame()
-      for (cc in setdiff(cl_cols_cd, colnames(w))) w[[cc]] <- 0L
-      w <- w[, c(keys, cl_cols_cd), drop=FALSE]
-      if (nrow(w) == 0) return(w)
-      w$Total_cells <- rowSums(w[, cl_cols_cd, drop=FALSE])
-      ord <- if (length(keys) > 1) order(w[[keys[1]]], w[[keys[2]]]) else
-                                  order(w[[keys[1]]])
-      w   <- w[ord, , drop=FALSE]
-      tot <- w[1, , drop=FALSE]
-      tot[1, keys] <- as.list(c("All CD45- cells", rep("", length(keys) - 1)))
-      tot[1, c(cl_cols_cd, "Total_cells")] <-
-        as.list(colSums(w[, c(cl_cols_cd, "Total_cells"), drop=FALSE]))
-      out <- rbind(w, tot)
-      rownames(out) <- NULL
-      out
+        group_by(cluster) %>%
+        mutate(total=sum(n), prop=n/total,
+               label_count=ifelse(prop>=MIN_LABEL_PROP, as.character(n), ""),
+               label_prop =ifelse(prop>=MIN_LABEL_PROP,
+                                  paste0(round(prop*100), "%"), ""),
+               y_pos=cumsum(if(type=="count") n else prop) -
+                     0.5*(if(type=="count") n else prop)) %>%
+        ungroup()
     }
 
-    # Row-normalized percentages (each row sums to 100%)
-    mk_pct_cd <- function(w) {
-      p <- w
-      p[, cl_cols_cd] <- round(sweep(as.matrix(w[, cl_cols_cd, drop=FALSE]), 1,
-                                      pmax(w$Total_cells, 1), "/") * 100, 1)
+    lab_sc_c <- make_label_df_m(umap_m_df, "strain_condition", "count")
+    lab_sc_p <- make_label_df_m(umap_m_df, "strain_condition", "prop")
+    lab_s_c  <- make_label_df_m(umap_m_df, "strain_group",     "count")
+    lab_s_p  <- make_label_df_m(umap_m_df, "strain_group",     "prop")
+
+    mk_bar <- function(lab, fill_var, pal, y_var, y_lab, title_str, prop=FALSE) {
+      # Use pre-computed label column based on prop flag
+      lab$bar_label <- if (isTRUE(prop)) lab$label_prop else lab$label_count
+      p <- ggplot(lab, aes(x=cluster, y=.data[[y_var]], fill=.data[[fill_var]])) +
+        geom_bar(stat="identity", position="stack", color="white", linewidth=0.15) +
+        geom_text(aes(y=y_pos, label=bar_label),
+                  size=2.5, color="white", fontface="bold") +
+        scale_fill_manual(values=pal, na.value="grey60") +
+        labs(title=title_str, x="Cluster",
+             y=y_lab, fill=sub(" —.*","",title_str)) +
+        theme_bw(base_size=10) +
+        theme(plot.title=element_text(face="bold", size=10),
+              panel.grid.minor=element_blank(),
+              legend.text=element_text(size=7),
+              legend.key.size=unit(0.4,"cm"))
+      if (isTRUE(prop)) p <- p + scale_y_continuous(labels=scales::percent_format())
       p
     }
 
-    pooled_cd  <- mk_wide_cd(cd45neg_m_df, "row_strain")
-    broken_cd  <- mk_wide_cd(cd45neg_m_df, c("row_strain","subgate"))
-    names(pooled_cd)[1] <- "strain"
-    names(broken_cd)[1] <- "strain"
+    p_b1 <- mk_bar(lab_sc_c, "strain_condition", sc_palette_merged,
+                    "n",    "Cell count",       "Strain & population — counts")
+    p_b2 <- mk_bar(lab_sc_p, "strain_condition", sc_palette_merged,
+                    "prop", "Proportion",       "Strain & population — proportions",
+                    prop=TRUE)
+    p_b3 <- mk_bar(lab_s_c,  "strain_group",     strain_colors_merged,
+                    "n",    "Cell count",       "Strain — counts")
+    p_b4 <- mk_bar(lab_s_p,  "strain_group",     strain_colors_merged,
+                    "prop", "Proportion",       "Strain — proportions", prop=TRUE)
 
-    sn_cd <- "CD45neg_Cluster_Distribution"
-    addWorksheet(wb_vaf_m, sn_cd)
-    st_h1  <- createStyle(textDecoration="bold", fontSize=13)
-    st_ttl <- createStyle(textDecoration="bold", fontSize=12)
-    st_sub <- createStyle(fontSize=9, fontColour="#595959",
-                          textDecoration="italic")
-    st_hdr <- createStyle(textDecoration="bold", fgFill="#E2EFDA",
-                          halign="center", border="bottom")
-    st_tot <- createStyle(textDecoration="bold", fgFill="#F2F2F2",
-                          halign="center")
-    st_ctr <- createStyle(halign="center")
-    st_max <- createStyle(textDecoration="bold", fgFill="#C6EFCE",
-                          halign="center")
-    st_pct <- createStyle(halign="center", numFmt="0.0")
+    bar_m <- (p_b1 | p_b2) / (p_b3 | p_b4) +
+      plot_annotation(
+        title    = paste0("Merged cluster composition — ", n_clust_m,
+                          " clusters | n=", nrow(umap_m_df), " cells"),
+        subtitle = paste0("Labels shown for segments >= ", MIN_LABEL_PROP*100,
+                          "% of bar"),
+        theme    = theme(plot.title=element_text(face="bold", size=14),
+                         plot.subtitle=element_text(size=9, color="grey40"))
+      )
+    ggsave(file.path(vaf_out_dir, "barplots_cluster_composition.pdf"),
+           bar_m, width=20, height=14)
+    cat("Saved: barplots_cluster_composition.pdf\n")
 
-    writeData(wb_vaf_m, sn_cd,
-      "CD45- MHCII+ cell distribution across merged Leiden clusters", startRow=1)
-    addStyle(wb_vaf_m, sn_cd, st_h1, rows=1, cols=1)
-    writeData(wb_vaf_m, sn_cd, paste0(
-      "Dataset: your cells + Clarke et al. 2025 (Combined). ",
-      "CD45+ MHCII+ reference/normalization wells are EXCLUDED. ",
-      "Clusters are the merged all-gene PCA + Leiden clusters."), startRow=2)
-    addStyle(wb_vaf_m, sn_cd, st_sub, rows=2, cols=1)
+    # -- Cluster marker genes (Wilcoxon on merged VST) ---------------------------
+    cat("Running Wilcoxon marker gene analysis on merged clusters...\n")
+    cluster_levels_m <- sort(unique(as.integer(as.character(umap_m_df$cluster))))
+    all_markers_m    <- list()
+    wb_m             <- createWorkbook()
 
-    row_cd <- 4
-    put_block_cd <- function(df, title, note, is_pct=FALSE) {
-      n_key  <- sum(!colnames(df) %in% c(cl_cols_cd, "Total_cells"))
-      ncol_d <- ncol(df)
-      writeData(wb_vaf_m, sn_cd, title, startRow=row_cd)
-      addStyle(wb_vaf_m, sn_cd, st_ttl, rows=row_cd, cols=1); row_cd <<- row_cd + 1
-      writeData(wb_vaf_m, sn_cd, note, startRow=row_cd)
-      addStyle(wb_vaf_m, sn_cd, st_sub, rows=row_cd, cols=1); row_cd <<- row_cd + 1
-      writeData(wb_vaf_m, sn_cd, df, startRow=row_cd, borders="none")
-      addStyle(wb_vaf_m, sn_cd, st_hdr, rows=row_cd, cols=1:ncol_d,
-               gridExpand=TRUE)
-      body_first <- row_cd + 1
-      body_last  <- row_cd + nrow(df) - 1   # last data row (total row excluded)
-      addStyle(wb_vaf_m, sn_cd, if (isTRUE(is_pct)) st_pct else st_ctr,
-               rows=body_first:body_last, cols=(n_key+1):ncol_d,
-               gridExpand=TRUE)
-      # highlight each row's dominant cluster
-      for (i in seq_len(nrow(df) - 1)) {
-        vals <- as.numeric(unlist(df[i, cl_cols_cd]))
-        if (max(vals) > 0) {
-          j <- n_key + which(vals == max(vals))
-          addStyle(wb_vaf_m, sn_cd, st_max, rows=body_first + i - 1, cols=j,
-                   gridExpand=TRUE)
+    summary_m <- umap_m_df %>%
+      group_by(cluster, strain, condition_clean) %>%
+      summarise(n_cells=n(), .groups="drop") %>%
+      arrange(as.integer(as.character(cluster)), strain, condition_clean)
+    addWorksheet(wb_m, "Summary"); writeData(wb_m, "Summary", summary_m)
+
+    for (cl in cluster_levels_m) {
+      cl_label   <- as.character(cl)
+      cl_cells   <- names(cluster_vec_m)[cluster_vec_m == cl_label]
+      rest_cells <- names(cluster_vec_m)[cluster_vec_m != cl_label]
+      mean_cl    <- rowMeans(merged_expr[, cl_cells,   drop=FALSE])
+      mean_rest  <- rowMeans(merged_expr[, rest_cells, drop=FALSE])
+      log2fc     <- mean_cl - mean_rest
+      candidates <- names(log2fc)[log2fc >= MIN_LOG2FC]
+      if (length(candidates) < 2) { all_markers_m[[cl_label]] <- data.frame(); next }
+      pv <- sapply(candidates, function(g)
+             wilcox.test(merged_expr[g, cl_cells], merged_expr[g, rest_cells],
+                         alternative="greater", exact=FALSE)$p.value)
+      pa <- p.adjust(pv, method="BH")
+      res_m <- data.frame(
+        ensembl_id=candidates, gene_symbol=to_sym(candidates),
+        mean_VST_cluster=round(mean_cl[candidates],4),
+        mean_VST_rest=round(mean_rest[candidates],4),
+        log2FC=round(log2fc[candidates],4),
+        pval=signif(pv,4), padj=signif(pa,4),
+        stringsAsFactors=FALSE) %>%
+        filter(padj < MAX_PADJ) %>%
+        arrange(desc(log2FC)) %>%
+        distinct(gene_symbol, .keep_all=TRUE) %>%
+        slice_head(n=TOP_EXCEL) %>%
+        mutate(rank=row_number()) %>%
+        select(rank,ensembl_id,gene_symbol,mean_VST_cluster,mean_VST_rest,
+               log2FC,pval,padj)
+      all_markers_m[[cl_label]] <- res_m
+      sn <- paste0("Cluster_", cl_label)
+      addWorksheet(wb_m, sn); writeData(wb_m, sn, res_m)
+      addStyle(wb_m, sn, style=createStyle(textDecoration="bold",fgFill="#D9E1F2"),
+               rows=1, cols=1:8, gridExpand=TRUE)
+      setColWidths(wb_m, sn, cols=1:8, widths=c(6,20,16,16,14,10,12,12))
+    }
+    markers_m_path <- file.path(vaf_out_dir, "cluster_marker_genes.xlsx")
+    saveWorkbook(wb_m, markers_m_path, overwrite=TRUE)
+    cat("Saved: cluster_marker_genes.xlsx\n")
+
+    # ============================================================================
+    # Pairwise cluster contrasts vs the VAF and VRC reference clusters
+    # ============================================================================
+    # The block above is one-vs-REST and one-sided (alternative="greater", with
+    # candidates pre-filtered to log2FC >= MIN_LOG2FC). That answers "what marks
+    # this cluster against all others pooled" — which dilutes a targeted
+    # comparison and cannot report depletion at all.
+    #
+    # This block answers the different question: for an uncharacterized cluster,
+    # what is up AND down relative specifically to the VAF cluster and to the VRC
+    # cluster? Depletion matters here — a cluster lacking both Col1a1 and Pecam1
+    # is evidence it is neither fibroblast nor endothelial, and the one-vs-rest
+    # output structurally cannot show that.
+    cat("\nRunning pairwise cluster contrasts vs VAF / VRC reference clusters...\n")
+
+    # -- Identify the reference clusters from Clarke cell membership -------------
+    # Derived each run rather than hardcoded: Leiden cluster IDs are not stable
+    # across runs whose plate roster or gene set changed, so a literal
+    # "VAF_CLUSTER <- 3" would silently rot.
+    modal_cluster <- function(ids, label) {
+      ids <- intersect(ids, names(cluster_vec_m))
+      if (length(ids) == 0) return(NA_character_)
+      tb <- table(cluster_vec_m[ids])
+      winner <- names(tb)[which.max(tb)]
+      cat(sprintf("  %s reference: cluster %s (%d/%d cells, %.1f%%)\n",
+                  label, winner, max(tb), length(ids),
+                  100 * max(tb) / length(ids)))
+      winner
+    }
+    vaf_ref_cl <- modal_cluster(vaf_ids_c, "VAF")
+    vrc_ref_cl <- modal_cluster(vrc_ids_c, "VRC")
+
+    if (is.na(vaf_ref_cl) || is.na(vrc_ref_cl)) {
+      cat("  Could not locate VAF/VRC reference clusters — skipping pairwise.\n")
+    } else if (vaf_ref_cl == vrc_ref_cl) {
+      cat("  WARNING: VAF and VRC reference cells share cluster", vaf_ref_cl,
+          "- the merged clustering does not separate them. Skipping pairwise.\n")
+    } else {
+      wb_pw <- createWorkbook()
+      pw_summary <- data.frame(
+        contrast=character(), n_query=integer(), n_reference=integer(),
+        n_up=integer(), n_down=integer(), stringsAsFactors=FALSE)
+
+      # Every cluster except the reference itself, tested against each reference.
+      refs <- c(VAF=vaf_ref_cl, VRC=vrc_ref_cl)
+      for (ref_name in names(refs)) {
+        ref_cl <- refs[[ref_name]]
+        for (q_cl in as.character(cluster_levels_m)) {
+          if (q_cl == ref_cl) next
+          q_cells <- names(cluster_vec_m)[cluster_vec_m == q_cl]
+          r_cells <- names(cluster_vec_m)[cluster_vec_m == ref_cl]
+          if (length(q_cells) < 3 || length(r_cells) < 3) {
+            cat("    Cluster", q_cl, "vs", ref_name, "- too few cells, skipped\n")
+            next
+          }
+
+          mean_q <- rowMeans(merged_expr[, q_cells, drop=FALSE])
+          mean_r <- rowMeans(merged_expr[, r_cells, drop=FALSE])
+          l2fc   <- mean_q - mean_r          # VST difference == log2 fold change
+
+          # Two-sided, and NOT pre-filtered by direction: keep any gene with a
+          # meaningful shift either way so depletion survives to the output.
+          cand <- names(l2fc)[abs(l2fc) >= MIN_LOG2FC]
+          if (length(cand) < 2) {
+            cat("    Cluster", q_cl, "vs", ref_name, "- no candidate genes\n")
+            next
+          }
+          pv <- sapply(cand, function(g)
+                  wilcox.test(merged_expr[g, q_cells], merged_expr[g, r_cells],
+                              exact=FALSE)$p.value)          # two-sided
+          pa <- p.adjust(pv, method="BH")
+
+          res_pw <- data.frame(
+            ensembl_id       = cand,
+            gene_symbol      = to_sym(cand),
+            mean_VST_query   = round(mean_q[cand], 4),
+            mean_VST_ref     = round(mean_r[cand], 4),
+            log2FC           = round(l2fc[cand], 4),
+            direction        = ifelse(l2fc[cand] > 0, "up_in_query",
+                                                      "down_in_query"),
+            pval             = signif(pv, 4),
+            padj             = signif(pa, 4),
+            stringsAsFactors = FALSE) %>%
+            filter(padj < MAX_PADJ) %>%
+            arrange(desc(abs(log2FC))) %>%
+            distinct(gene_symbol, .keep_all=TRUE)
+
+          n_up   <- sum(res_pw$direction == "up_in_query")
+          n_down <- sum(res_pw$direction == "down_in_query")
+          cat(sprintf("    Cluster %s vs %s (cluster %s): %d up, %d down\n",
+                      q_cl, ref_name, ref_cl, n_up, n_down))
+
+          sn_pw <- paste0("C", q_cl, "_vs_", ref_name)
+          addWorksheet(wb_pw, sn_pw)
+          writeData(wb_pw, sn_pw, res_pw)
+          addStyle(wb_pw, sn_pw,
+                   style=createStyle(textDecoration="bold", fgFill="#D9E1F2"),
+                   rows=1, cols=1:8, gridExpand=TRUE)
+          setColWidths(wb_pw, sn_pw, cols=1:8,
+                       widths=c(20,16,16,14,10,14,12,12))
+          pw_summary <- rbind(pw_summary, data.frame(
+            contrast=sn_pw, n_query=length(q_cells), n_reference=length(r_cells),
+            n_up=n_up, n_down=n_down, stringsAsFactors=FALSE))
         }
       }
-      addStyle(wb_vaf_m, sn_cd, st_tot, rows=row_cd + nrow(df),
-               cols=1:ncol_d, gridExpand=TRUE)
-      row_cd <<- row_cd + nrow(df) + 3
+
+      notes_pw <- data.frame(Note=c(
+        paste0("Pairwise Wilcoxon contrasts on merged batch-corrected VST. ",
+               "Two-sided; both enrichment and depletion reported."),
+        paste0("VAF reference = cluster ", vaf_ref_cl,
+               "; VRC reference = cluster ", vrc_ref_cl,
+               " (assigned from Clarke 2025 cell membership this run)."),
+        paste0("log2FC = mean VST(query) - mean VST(reference). ",
+               "Positive = up in query cluster."),
+        paste0("Thresholds: |log2FC| >= ", MIN_LOG2FC, ", BH padj < ", MAX_PADJ, "."),
+        paste0("Cluster IDs are re-derived every run and are NOT comparable ",
+               "across runs with a different plate roster or gene set."),
+        paste0("Distinct from cluster_marker_genes.xlsx, which is one-vs-rest ",
+               "and upregulated-only.")), stringsAsFactors=FALSE)
+      addWorksheet(wb_pw, "Notes");   writeData(wb_pw, "Notes", notes_pw)
+      setColWidths(wb_pw, "Notes", cols=1, widths=110)
+      addWorksheet(wb_pw, "Summary"); writeData(wb_pw, "Summary", pw_summary)
+      setColWidths(wb_pw, "Summary", cols=1:5, widths=c(18,10,14,8,8))
+
+      saveWorkbook(wb_pw, file.path(vaf_out_dir, "cluster_pairwise_contrasts.xlsx"),
+                   overwrite=TRUE)
+      cat("Saved: cluster_pairwise_contrasts.xlsx\n")
     }
 
-    put_block_cd(pooled_cd,
-      "Table 1 - Cell counts by strain (all CD45- subgates pooled)",
-      paste0("Rows = strain; values = number of CD45- MHCII+ cells assigned to ",
-             "each cluster. Green = that strain's dominant cluster."))
-    put_block_cd(mk_pct_cd(pooled_cd),
-      "Table 2 - Row percentages by strain (% of that strain's CD45- cells)",
-      "Each row sums to 100%.", is_pct=TRUE)
-    put_block_cd(broken_cd,
-      "Table 3 - Cell counts by strain and MHCII subgate",
-      paste0("MHCIIhi / MHCIIlo = per-plate sort gates; MHCIIpos = a single ",
-             "CD45- gate (e.g. NODPDL1); VAF / VRC = Clarke 2025 reference ",
-             "CD45- populations."))
-    put_block_cd(mk_pct_cd(broken_cd),
-      "Table 4 - Row percentages by strain and MHCII subgate",
-      "Each row sums to 100%.", is_pct=TRUE)
-
-    setColWidths(wb_vaf_m, sn_cd, cols=1:(length(cl_cols_cd) + 3),
-                 widths=c(20, 14, rep(12, length(cl_cols_cd) + 1)))
-    freezePane(wb_vaf_m, sn_cd, firstActiveRow=4)
-    cat("  Sheet added:", sn_cd, "-",
-        nrow(cd45neg_m_df), "CD45- cells tabulated\n")
-
-    saveWorkbook(wb_vaf_m,
-                 file.path(vaf_out_dir, "VAF_VRC_correlation_merged_clusters.xlsx"),
-                 overwrite=TRUE)
-    cat("Saved: VAF_VRC_correlation_merged_clusters.xlsx\n")
-  } else {
-    cat("  Skipping VAF/VRC correlation (ref_profiles not available)\n")
-  }
-
-  # -- MCA cell type correlation on merged clusters ----------------------------
-  # -- CellMarker gene set scoring on merged clusters -------------------------
-  cat("Running CellMarker cell identity scoring on merged clusters...\n")
-  wb_cellid_m <- createWorkbook()
-  cluster_results_m_ci <- list()
-
-  summary_cellid_m <- data.frame(cluster=character(), n_markers=integer(),
-                                   top_cell_type=character(),
-                                   stringsAsFactors=FALSE)
-  for (cl_label in as.character(cluster_levels_m)) {
-    cl_cells_m   <- names(cluster_vec_m)[cluster_vec_m == cl_label]
-    rest_cells_m <- names(cluster_vec_m)[cluster_vec_m != cl_label]
-
-    syms_m <- character(0)
-    if (length(cl_cells_m) >= 2 && length(rest_cells_m) >= 2) {
-      mean_cl_m   <- rowMeans(merged_expr[, cl_cells_m,   drop=FALSE])
-      mean_rest_m <- rowMeans(merged_expr[, rest_cells_m, drop=FALSE])
-      lfc_m       <- mean_cl_m - mean_rest_m
-      cands_m     <- names(lfc_m)[lfc_m >= MIN_LOG2FC]
-      if (length(cands_m) >= 2) {
-        pv_m <- sapply(cands_m, function(g)
-          wilcox.test(merged_expr[g, cl_cells_m], merged_expr[g, rest_cells_m],
-                      alternative="greater", exact=FALSE)$p.value)
-        pa_m <- p.adjust(pv_m, method="BH")
-        sig_m <- cands_m[pa_m < MAX_PADJ]
-        syms_m <- unique(to_sym(sig_m)); syms_m <- syms_m[syms_m != ""]
+    # -- Heatmap -----------------------------------------------------------------
+    cat("Generating merged cluster marker heatmap...\n")
+    hm_genes_m <- c()
+    for (cl_label in as.character(cluster_levels_m)) {
+      if (!is.null(all_markers_m[[cl_label]]) &&
+          nrow(all_markers_m[[cl_label]]) > 0) {
+        top_g <- all_markers_m[[cl_label]]$gene_symbol[
+                   !all_markers_m[[cl_label]]$gene_symbol %in% hm_genes_m]
+        hm_genes_m <- c(hm_genes_m, head(top_g, TOP_HEATMAP))
       }
     }
-    if (length(syms_m) < 10) {
-      mean_cl_m   <- if (length(cl_cells_m)==1) merged_expr[,cl_cells_m]
-                     else rowMeans(merged_expr[,cl_cells_m,drop=FALSE])
-      top_ens_m   <- names(sort(mean_cl_m, decreasing=TRUE))[1:min(50,length(mean_cl_m))]
-      syms_m      <- unique(to_sym(top_ens_m)); syms_m <- syms_m[syms_m != ""]
+    cat("Heatmap genes:", length(hm_genes_m), "\n")
+    sym_to_ens_m  <- setNames(names(sym_map), sym_map)
+    hm_ens_m      <- sym_to_ens_m[hm_genes_m]
+    hm_ens_m      <- hm_ens_m[!is.na(hm_ens_m) & hm_ens_m %in% rownames(merged_expr)]
+    cell_ord_m    <- umap_m_df$cell_id[order(as.integer(
+                       as.character(umap_m_df$cluster)))]
+    expr_hm_m     <- merged_expr[hm_ens_m, cell_ord_m]
+    rownames(expr_hm_m) <- to_sym(rownames(expr_hm_m))
+    expr_z_m      <- t(scale(t(expr_hm_m)))
+    expr_z_m[expr_z_m >  2.5] <-  2.5
+    expr_z_m[expr_z_m < -2.5] <- -2.5
+    clust_anno_m  <- as.character(umap_m_df$cluster[
+                       match(cell_ord_m, umap_m_df$cell_id)])
+    ha_m <- HeatmapAnnotation(
+      Cluster=clust_anno_m,
+      col=list(Cluster=cluster_pal_m),
+      annotation_name_side="left"
+    )
+    col_fun_m <- colorRamp2(c(-2.5,0,2.5), c("#3D0751","#1A1A1A","#F5E642"))
+    ht_m <- Heatmap(
+      expr_z_m, name="Z-score", col=col_fun_m,
+      top_annotation=ha_m,
+      show_column_names=FALSE, show_row_names=TRUE,
+      row_names_gp=gpar(fontsize=7, fontface="italic"),
+      cluster_rows=FALSE, cluster_columns=FALSE,
+      column_title=paste0("Merged cluster marker genes — ",
+                           length(hm_genes_m), " genes x ", ncol(expr_z_m), " cells"),
+      column_title_gp=gpar(fontsize=12, fontface="bold"),
+      use_raster=TRUE, raster_quality=5, raster_device=HT_RASTER_DEVICE
+    )
+    hm_path_m <- file.path(vaf_out_dir, "heatmap_cluster_markers.pdf")
+    pdf(hm_path_m, width=18,
+        height=max(8, length(hm_genes_m)*0.18+3))
+    draw(ht_m, heatmap_legend_side="right", annotation_legend_side="bottom")
+    dev.off()
+    cat("Saved: heatmap_cluster_markers.pdf\n")
+
+    # -- Cluster violin plots ----------------------------------------------------
+    cat("Generating merged cluster violin plots...\n")
+    # Unlike the combined violins above, these CANNOT fall back to the per-plate
+    # VST matrices: merged_expr is limma batch-corrected across your cells +
+    # Clarke, so splicing in an uncorrected per-plate value would put two
+    # different scales on one axis. A gene missing here is genuinely
+    # unplottable in the merged space, so the panel is skipped with a reason
+    # rather than silently omitted or crashed on.
+    vln_ens_m <- sym_to_ens_m[VIOLIN_GENES]
+    vln_ens_m <- vln_ens_m[!is.na(vln_ens_m) & vln_ens_m %in% rownames(merged_expr)]
+
+    dropped_m <- setdiff(VIOLIN_GENES, names(vln_ens_m))
+    if (length(dropped_m) > 0) {
+      cat("  Not plottable in merged space:", paste(dropped_m, collapse=", "), "\n")
+      cat("  (merged_expr keeps only genes shared by every plate AND Clarke;\n")
+      cat("   e.g. Ptprc has 0 counts in NODCD31, so it leaves the intersection.)\n")
     }
-    sc_m   <- score_cluster(syms_m, cell_db, universe_size)
-    top_ct_m <- if (nrow(sc_m) > 0) sc_m$cell_type[1] else "no match"
-    summary_cellid_m <- rbind(summary_cellid_m,
-                               data.frame(cluster=cl_label,
-                                          n_markers=length(syms_m),
-                                          top_cell_type=top_ct_m,
-                                          stringsAsFactors=FALSE))
-    cluster_results_m_ci[[cl_label]] <- sc_m
-    sn_ci <- paste0("Cluster_", cl_label)
-    addWorksheet(wb_cellid_m, sn_ci); writeData(wb_cellid_m, sn_ci, sc_m)
-    addStyle(wb_cellid_m, sn_ci,
+
+    if (length(vln_ens_m) == 0) {
+      cat("  No violin genes available in merged matrix — skipping merged violins.\n")
+    } else {
+
+    vln_m_df <- as.data.frame(t(merged_expr[vln_ens_m, umap_m_df$cell_id,
+                                              drop=FALSE])) %>%
+      tibble::rownames_to_column("cell_id") %>%
+      left_join(umap_m_df[, c("cell_id","cluster")], by="cell_id") %>%
+      pivot_longer(-c(cell_id,cluster), names_to="ensembl_id", values_to="VST") %>%
+      mutate(gene_symbol=to_sym(ensembl_id),
+             cluster=factor(cluster,
+                             levels=sort(unique(as.integer(
+                               as.character(umap_m_df$cluster))))))
+
+    vln_m_plots <- lapply(seq_along(vln_ens_m), function(i) {
+      ens <- vln_ens_m[i]; sym <- names(vln_ens_m)[i]
+      df_g <- vln_m_df %>% filter(ensembl_id == ens)
+      ggplot(df_g, aes(x=cluster, y=VST, fill=cluster)) +
+        geom_violin(trim=TRUE, scale="width", alpha=0.85, linewidth=0.3) +
+        geom_jitter(width=0.15, size=0.6, alpha=0.35, color="grey20") +
+        scale_fill_manual(values=cluster_pal_m) +
+        labs(title=sym, x="Leiden Cluster", y="VST expression") +
+        theme_bw(base_size=11) +
+        theme(plot.title=element_text(face="bold.italic", size=11),
+              legend.position="none", panel.grid.minor=element_blank())
+    })
+    n_vln_m   <- length(vln_m_plots)
+    vln_m_panel <- wrap_plots(vln_m_plots, ncol=min(3, n_vln_m)) +
+      plot_annotation(
+        title    = "Gene expression across merged Leiden clusters",
+        subtitle = paste0("VST-normalized | n=", nrow(umap_m_df),
+                          " cells (your data + Clarke 2025)"),
+        theme    = theme(plot.title=element_text(face="bold", size=13),
+                         plot.subtitle=element_text(size=9, color="grey40"))
+      )
+    ggsave(file.path(vaf_out_dir, "violin_plots_by_cluster.pdf"),
+           vln_m_panel,
+           width=min(3,n_vln_m)*5, height=ceiling(n_vln_m/3)*5)
+    cat("Saved: violin_plots_by_cluster.pdf\n")
+    }
+
+    # -- VAF/VRC correlation on merged clusters ----------------------------------
+    cat("Running VAF/VRC correlation on merged clusters...\n")
+    # Reuse ref_profiles from earlier VAF/VRC block if available
+    if (exists("ref_profiles")) {
+      your_sym_merged   <- to_sym(rownames(merged_expr))
+      common_m_vaf      <- intersect(your_sym_merged, names(ref_profiles[["VAF"]]))
+      your_idx_m        <- which(your_sym_merged %in% common_m_vaf)
+      your_syms_m       <- your_sym_merged[your_idx_m]
+      wb_vaf_m          <- createWorkbook()
+      summary_vaf_m     <- NULL
+      for (cl_label in as.character(cluster_levels_m)) {
+        cl_cells_m <- names(cluster_vec_m)[cluster_vec_m == cl_label]
+        your_mean_m <- rowMeans(merged_expr[your_idx_m, cl_cells_m, drop=FALSE])
+        names(your_mean_m) <- your_syms_m
+        cl_corrs_m <- data.frame(reference_population=character(),
+                                  pearson_r=numeric(), spearman_rho=numeric(),
+                                  n_genes=integer(), stringsAsFactors=FALSE)
+        for (ref_name in names(ref_profiles)) {
+          ref_v  <- ref_profiles[[ref_name]]
+          common <- intersect(names(your_mean_m), names(ref_v))
+          if (length(common) < 50) next
+          cl_corrs_m <- rbind(cl_corrs_m, data.frame(
+            reference_population=ref_name,
+            pearson_r=round(cor(your_mean_m[common], ref_v[common], method="pearson"),4),
+            spearman_rho=round(cor(your_mean_m[common], ref_v[common], method="spearman"),4),
+            n_genes=length(common), stringsAsFactors=FALSE))
+        }
+        summary_vaf_m <- rbind(summary_vaf_m,
+                               summarise_best_match(cl_label, cl_corrs_m))
+        sn_m <- paste0("Cluster_", cl_label)
+        addWorksheet(wb_vaf_m, sn_m); writeData(wb_vaf_m, sn_m, cl_corrs_m)
+        addStyle(wb_vaf_m, sn_m,
+                 style=createStyle(textDecoration="bold", fgFill="#E2EFDA"),
+                 rows=1, cols=1:4, gridExpand=TRUE)
+        if (nrow(cl_corrs_m) > 0) {
+          best_idx_m <- which.max(cl_corrs_m$pearson_r) + 1
+          addStyle(wb_vaf_m, sn_m, style=createStyle(fgFill="#C6EFCE"),
+                   rows=best_idx_m, cols=1:4, gridExpand=TRUE)
+        }
+        setColWidths(wb_vaf_m, sn_m, cols=1:4, widths=c(22,12,14,10))
+      }
+      addWorksheet(wb_vaf_m, "Summary"); writeData(wb_vaf_m, "Summary", summary_vaf_m)
+      addStyle(wb_vaf_m, "Summary",
+               style=createStyle(textDecoration="bold", fgFill="#E2EFDA"),
+               rows=1, cols=1:9, gridExpand=TRUE)
+      setColWidths(wb_vaf_m, "Summary", cols=1:9,
+                   widths=c(10,16,11,15,17,16,12,10,42))
+      # Grey out any cluster whose call did not clear both tests.
+      if (!is.null(summary_vaf_m) && any(!summary_vaf_m$confident)) {
+        addStyle(wb_vaf_m, "Summary", style=createStyle(fontColour="#9C0006",
+                 fgFill="#FFC7CE"),
+                 rows=which(!summary_vaf_m$confident) + 1, cols=1:9,
+                 gridExpand=TRUE)
+      }
+      addWorksheet(wb_vaf_m, "Notes")
+      writeData(wb_vaf_m, "Notes", data.frame(Note=c(
+        paste0("best_match is reported only when the winning Pearson r >= ", MIN_CORR_R,
+               " AND it beats the runner-up by >= ", MIN_CORR_MARGIN,
+               ". Otherwise best_match is 'unresolved' and why_unresolved says which test failed."),
+        "The per-cluster sheets carry every raw correlation regardless; nothing is hidden by this rule.",
+        paste0("REFERENCE CONSTRUCTION: GSE292898 ships no cell-type labels, only the ",
+               "CD45-/HLA-DR+ sort gate, so the three populations are inferred, not published. "),
+        if (exists("REF_SOURCE_NOTE")) REF_SOURCE_NOTE else "Reference source not recorded.",
+        paste0("MAJOR CAVEAT -- 'VAF' IS NOT FIBROBLAST. In the reference centroids actually used ",
+               "by this run, every fibroblast marker is absent from the VAF profile (mean VST ",
+               "Col1a1 -2.9, Col1a2 -1.5, Pdgfra -3.3, Dcn -3.0, Lum -3.3) while every islet-endocrine ",
+               "marker is strongly positive (Gcg 9.7, Ins2 9.0, Pcsk2 8.0, Chga 7.6). Read a VAF match ",
+               "as 'resembles Clarke's CD45- non-endothelial cells', which are predominantly endocrine -- ",
+               "NOT as evidence of fibroblast identity. Clarke et al. themselves report they could not ",
+               "determine a convincing embryologic origin for this population."),
+        paste0("By contrast CD45pos (Ptprc 7.9) and VRC (Pecam1 9.9, Cdh5 8.7, Plvap 13.9) are ",
+               "cleanly identified by their canonical markers and can be read at face value."),
+        "Cluster IDs are re-derived every run and are NOT comparable across runs with a different cell or gene set."),
+        stringsAsFactors=FALSE))
+      setColWidths(wb_vaf_m, "Notes", cols=1, widths=120)
+
+      # -- CD45- MHCII+ cluster distribution --------------------------------------
+      # Where does each CD45- MHCII+ cell land, cluster-wise, per strain?
+      # The CD45+ MHCII+ normalization/reference wells are excluded, as are the
+      # Clarke CD45pos cells. Clarke VAF/VRC are kept as labeled reference rows.
+      # Exclusion is by the CD45 gate, not by "is the reference": NODCD31's
+      # baseline (CD31-) is a CD45- population and belongs in this table.
+      cat("Building CD45- MHCII+ cluster distribution sheet...\n")
+
+      cd45neg_m_df <- umap_m_df %>%
+        filter(is_cd45neg(condition)) %>%
+        mutate(
+          row_strain = ifelse(strain_group == "Clarke2025",
+                              "Clarke2025 (ref)", strain),
+          subgate    = ifelse(strain_group == "Clarke2025",
+                              sub("^Clarke2025 ", "", strain_condition),
+                              sub("^CD45neg_", "", condition))
+        )
+
+      cl_cols_cd <- paste0("Cluster_", as.character(cluster_levels_m))
+
+      # Wide count table + an "All CD45- cells" column-total row
+      mk_wide_cd <- function(df, keys) {
+        w <- df %>%
+          group_by(across(all_of(keys)), cluster) %>%
+          summarise(n=n(), .groups="drop") %>%
+          mutate(cluster=paste0("Cluster_", as.character(cluster))) %>%
+          pivot_wider(names_from=cluster, values_from=n, values_fill=0) %>%
+          as.data.frame()
+        for (cc in setdiff(cl_cols_cd, colnames(w))) w[[cc]] <- 0L
+        w <- w[, c(keys, cl_cols_cd), drop=FALSE]
+        if (nrow(w) == 0) return(w)
+        w$Total_cells <- rowSums(w[, cl_cols_cd, drop=FALSE])
+        ord <- if (length(keys) > 1) order(w[[keys[1]]], w[[keys[2]]]) else
+                                    order(w[[keys[1]]])
+        w   <- w[ord, , drop=FALSE]
+        tot <- w[1, , drop=FALSE]
+        tot[1, keys] <- as.list(c("All CD45- cells", rep("", length(keys) - 1)))
+        tot[1, c(cl_cols_cd, "Total_cells")] <-
+          as.list(colSums(w[, c(cl_cols_cd, "Total_cells"), drop=FALSE]))
+        out <- rbind(w, tot)
+        rownames(out) <- NULL
+        out
+      }
+
+      # Row-normalized percentages (each row sums to 100%)
+      mk_pct_cd <- function(w) {
+        p <- w
+        p[, cl_cols_cd] <- round(sweep(as.matrix(w[, cl_cols_cd, drop=FALSE]), 1,
+                                        pmax(w$Total_cells, 1), "/") * 100, 1)
+        p
+      }
+
+      pooled_cd  <- mk_wide_cd(cd45neg_m_df, "row_strain")
+      broken_cd  <- mk_wide_cd(cd45neg_m_df, c("row_strain","subgate"))
+      names(pooled_cd)[1] <- "strain"
+      names(broken_cd)[1] <- "strain"
+
+      sn_cd <- "CD45neg_Cluster_Distribution"
+      addWorksheet(wb_vaf_m, sn_cd)
+      st_h1  <- createStyle(textDecoration="bold", fontSize=13)
+      st_ttl <- createStyle(textDecoration="bold", fontSize=12)
+      st_sub <- createStyle(fontSize=9, fontColour="#595959",
+                            textDecoration="italic")
+      st_hdr <- createStyle(textDecoration="bold", fgFill="#E2EFDA",
+                            halign="center", border="bottom")
+      st_tot <- createStyle(textDecoration="bold", fgFill="#F2F2F2",
+                            halign="center")
+      st_ctr <- createStyle(halign="center")
+      st_max <- createStyle(textDecoration="bold", fgFill="#C6EFCE",
+                            halign="center")
+      st_pct <- createStyle(halign="center", numFmt="0.0")
+
+      writeData(wb_vaf_m, sn_cd,
+        "CD45- MHCII+ cell distribution across merged Leiden clusters", startRow=1)
+      addStyle(wb_vaf_m, sn_cd, st_h1, rows=1, cols=1)
+      writeData(wb_vaf_m, sn_cd, paste0(
+        "Dataset: your cells + Clarke et al. 2025 (Combined). ",
+        "CD45+ MHCII+ reference/normalization wells are EXCLUDED. ",
+        "Clusters are the merged all-gene PCA + Leiden clusters."), startRow=2)
+      addStyle(wb_vaf_m, sn_cd, st_sub, rows=2, cols=1)
+
+      row_cd <- 4
+      put_block_cd <- function(df, title, note, is_pct=FALSE) {
+        n_key  <- sum(!colnames(df) %in% c(cl_cols_cd, "Total_cells"))
+        ncol_d <- ncol(df)
+        writeData(wb_vaf_m, sn_cd, title, startRow=row_cd)
+        addStyle(wb_vaf_m, sn_cd, st_ttl, rows=row_cd, cols=1); row_cd <<- row_cd + 1
+        writeData(wb_vaf_m, sn_cd, note, startRow=row_cd)
+        addStyle(wb_vaf_m, sn_cd, st_sub, rows=row_cd, cols=1); row_cd <<- row_cd + 1
+        writeData(wb_vaf_m, sn_cd, df, startRow=row_cd, borders="none")
+        addStyle(wb_vaf_m, sn_cd, st_hdr, rows=row_cd, cols=1:ncol_d,
+                 gridExpand=TRUE)
+        body_first <- row_cd + 1
+        body_last  <- row_cd + nrow(df) - 1   # last data row (total row excluded)
+        addStyle(wb_vaf_m, sn_cd, if (isTRUE(is_pct)) st_pct else st_ctr,
+                 rows=body_first:body_last, cols=(n_key+1):ncol_d,
+                 gridExpand=TRUE)
+        # highlight each row's dominant cluster
+        for (i in seq_len(nrow(df) - 1)) {
+          vals <- as.numeric(unlist(df[i, cl_cols_cd]))
+          if (max(vals) > 0) {
+            j <- n_key + which(vals == max(vals))
+            addStyle(wb_vaf_m, sn_cd, st_max, rows=body_first + i - 1, cols=j,
+                     gridExpand=TRUE)
+          }
+        }
+        addStyle(wb_vaf_m, sn_cd, st_tot, rows=row_cd + nrow(df),
+                 cols=1:ncol_d, gridExpand=TRUE)
+        row_cd <<- row_cd + nrow(df) + 3
+      }
+
+      put_block_cd(pooled_cd,
+        "Table 1 - Cell counts by strain (all CD45- subgates pooled)",
+        paste0("Rows = strain; values = number of CD45- MHCII+ cells assigned to ",
+               "each cluster. Green = that strain's dominant cluster."))
+      put_block_cd(mk_pct_cd(pooled_cd),
+        "Table 2 - Row percentages by strain (% of that strain's CD45- cells)",
+        "Each row sums to 100%.", is_pct=TRUE)
+      put_block_cd(broken_cd,
+        "Table 3 - Cell counts by strain and MHCII subgate",
+        paste0("MHCIIhi / MHCIIlo = per-plate sort gates; MHCIIpos = a single ",
+               "CD45- gate (e.g. NODPDL1); VAF / VRC = Clarke 2025 reference ",
+               "CD45- populations."))
+      put_block_cd(mk_pct_cd(broken_cd),
+        "Table 4 - Row percentages by strain and MHCII subgate",
+        "Each row sums to 100%.", is_pct=TRUE)
+
+      setColWidths(wb_vaf_m, sn_cd, cols=1:(length(cl_cols_cd) + 3),
+                   widths=c(20, 14, rep(12, length(cl_cols_cd) + 1)))
+      freezePane(wb_vaf_m, sn_cd, firstActiveRow=4)
+      cat("  Sheet added:", sn_cd, "-",
+          nrow(cd45neg_m_df), "CD45- cells tabulated\n")
+
+      saveWorkbook(wb_vaf_m,
+                   file.path(vaf_out_dir, "VAF_VRC_correlation_merged_clusters.xlsx"),
+                   overwrite=TRUE)
+      cat("Saved: VAF_VRC_correlation_merged_clusters.xlsx\n")
+    } else {
+      cat("  Skipping VAF/VRC correlation (ref_profiles not available)\n")
+    }
+
+    # -- MCA cell type correlation on merged clusters ----------------------------
+    # -- CellMarker gene set scoring on merged clusters -------------------------
+    cat("Running CellMarker cell identity scoring on merged clusters...\n")
+    wb_cellid_m <- createWorkbook()
+    cluster_results_m_ci <- list()
+
+    summary_cellid_m <- data.frame(cluster=character(), n_markers=integer(),
+                                     top_cell_type=character(),
+                                     stringsAsFactors=FALSE)
+    for (cl_label in as.character(cluster_levels_m)) {
+      cl_cells_m   <- names(cluster_vec_m)[cluster_vec_m == cl_label]
+      rest_cells_m <- names(cluster_vec_m)[cluster_vec_m != cl_label]
+
+      syms_m <- character(0)
+      if (length(cl_cells_m) >= 2 && length(rest_cells_m) >= 2) {
+        mean_cl_m   <- rowMeans(merged_expr[, cl_cells_m,   drop=FALSE])
+        mean_rest_m <- rowMeans(merged_expr[, rest_cells_m, drop=FALSE])
+        lfc_m       <- mean_cl_m - mean_rest_m
+        cands_m     <- names(lfc_m)[lfc_m >= MIN_LOG2FC]
+        if (length(cands_m) >= 2) {
+          pv_m <- sapply(cands_m, function(g)
+            wilcox.test(merged_expr[g, cl_cells_m], merged_expr[g, rest_cells_m],
+                        alternative="greater", exact=FALSE)$p.value)
+          pa_m <- p.adjust(pv_m, method="BH")
+          sig_m <- cands_m[pa_m < MAX_PADJ]
+          syms_m <- unique(to_sym(sig_m)); syms_m <- syms_m[syms_m != ""]
+        }
+      }
+      if (length(syms_m) < 10) {
+        mean_cl_m   <- if (length(cl_cells_m)==1) merged_expr[,cl_cells_m]
+                       else rowMeans(merged_expr[,cl_cells_m,drop=FALSE])
+        top_ens_m   <- names(sort(mean_cl_m, decreasing=TRUE))[1:min(50,length(mean_cl_m))]
+        syms_m      <- unique(to_sym(top_ens_m)); syms_m <- syms_m[syms_m != ""]
+      }
+      sc_m   <- score_cluster(syms_m, cell_db, universe_size)
+      top_ct_m <- if (nrow(sc_m) > 0) sc_m$cell_type[1] else "no match"
+      summary_cellid_m <- rbind(summary_cellid_m,
+                                 data.frame(cluster=cl_label,
+                                            n_markers=length(syms_m),
+                                            top_cell_type=top_ct_m,
+                                            stringsAsFactors=FALSE))
+      cluster_results_m_ci[[cl_label]] <- sc_m
+      sn_ci <- paste0("Cluster_", cl_label)
+      addWorksheet(wb_cellid_m, sn_ci); writeData(wb_cellid_m, sn_ci, sc_m)
+      addStyle(wb_cellid_m, sn_ci,
+        style=createStyle(textDecoration="bold", fgFill="#D9E1F2"),
+        rows=1, cols=1:10, gridExpand=TRUE)
+      setColWidths(wb_cellid_m, sn_ci, cols=1:10,
+        widths=c(5,25,10,14,12,10,12,12,12,40))
+    }
+    # Build top-5 summary for merged cell identity
+    merged_sum_top5 <- do.call(rbind, lapply(names(cluster_results_m_ci), function(cl) {
+      df <- cluster_results_m_ci[[cl]]
+      if (is.null(df) || nrow(df) == 0) return(NULL)
+      top5 <- head(df, 5)
+      data.frame(cluster=cl, rank=seq_len(nrow(top5)),
+                 cell_type=top5$cell_type,
+                 fisher_pval=signif(top5$fisher_pval, 3),
+                 stringsAsFactors=FALSE)
+    }))
+    addWorksheet(wb_cellid_m, "Summary")
+    writeData(wb_cellid_m, "Summary", merged_sum_top5)
+    addStyle(wb_cellid_m, "Summary",
       style=createStyle(textDecoration="bold", fgFill="#D9E1F2"),
-      rows=1, cols=1:10, gridExpand=TRUE)
-    setColWidths(wb_cellid_m, sn_ci, cols=1:10,
-      widths=c(5,25,10,14,12,10,12,12,12,40))
-  }
-  # Build top-5 summary for merged cell identity
-  merged_sum_top5 <- do.call(rbind, lapply(names(cluster_results_m_ci), function(cl) {
-    df <- cluster_results_m_ci[[cl]]
-    if (is.null(df) || nrow(df) == 0) return(NULL)
-    top5 <- head(df, 5)
-    data.frame(cluster=cl, rank=seq_len(nrow(top5)),
-               cell_type=top5$cell_type,
-               fisher_pval=signif(top5$fisher_pval, 3),
-               stringsAsFactors=FALSE)
-  }))
-  addWorksheet(wb_cellid_m, "Summary")
-  writeData(wb_cellid_m, "Summary", merged_sum_top5)
-  addStyle(wb_cellid_m, "Summary",
-    style=createStyle(textDecoration="bold", fgFill="#D9E1F2"),
-    rows=1, cols=1:4, gridExpand=TRUE)
-  setColWidths(wb_cellid_m, "Summary", cols=1:4, widths=c(10,6,35,12))
-  saveWorkbook(wb_cellid_m,
-               file.path(vaf_out_dir, "cell_identity_merged_clusters.xlsx"),
-               overwrite=TRUE)
-  cat("Saved: cell_identity_merged_clusters.xlsx\n")
+      rows=1, cols=1:4, gridExpand=TRUE)
+    setColWidths(wb_cellid_m, "Summary", cols=1:4, widths=c(10,6,35,12))
+    saveWorkbook(wb_cellid_m,
+                 file.path(vaf_out_dir, "cell_identity_merged_clusters.xlsx"),
+                 overwrite=TRUE)
+    cat("Saved: cell_identity_merged_clusters.xlsx\n")
 
-  # -- MCA correlation on merged clusters -------------------------------------
-  cat("Running MCA cell type correlation on merged clusters...\n")
-  run_mca_correlation(
-    expr_mat          = merged_expr,
-    cluster_vec_input = cluster_vec_m,
-    cluster_levels_input = cluster_levels_m,
-    to_sym_fn         = to_sym,
-    out_path          = file.path(vaf_out_dir,
-                                   "MCA_celltype_correlation_merged_clusters.xlsx"),
-    label             = "merged"
-  )
+    # -- MCA correlation on merged clusters -------------------------------------
+    cat("Running MCA cell type correlation on merged clusters...\n")
+    run_mca_correlation(
+      expr_mat          = merged_expr,
+      cluster_vec_input = cluster_vec_m,
+      cluster_levels_input = cluster_levels_m,
+      to_sym_fn         = to_sym,
+      out_path          = file.path(vaf_out_dir,
+                                     "MCA_celltype_correlation_merged_clusters.xlsx"),
+      label             = "merged"
+    )
 
-  cat("\nCombined complete.\n")
-  cat("Output folder:", vaf_out_dir, "\n")
-  cat("Files written:\n")
-  for (f in list.files(vaf_out_dir)) cat(" -", f, "\n")
+    cat("\nMerged analysis '", mg$name, "' complete.\n", sep="")
+    cat("Output folder:", vaf_out_dir, "\n")
+    cat("Files written:\n")
+    for (f in list.files(vaf_out_dir)) cat(" -", f, "\n")
+
+  } # end MERGE_SPECS loop
 
 } # end if vaf_counts_f2 exists
 
@@ -5086,6 +5151,16 @@ if (RUN_COMBINED_PLOTS) {
   cat("   - heatmap_cluster_markers.pdf\n")
 } else {
   cat(" (combined_plots/ skipped - RUN_COMBINED_PLOTS is FALSE)\n")
+}
+if (RUN_VAF_MERGED) {
+  for (mg in MERGE_SPECS) {
+    cat(" results/05_dge/", mg$name, "/  (your plates: ",
+        if (is.null(mg$strains)) "all" else paste(mg$strains, collapse=", "),
+        " + Clarke2025)\n", sep="")
+  }
+  cat("   NOTE: cluster IDs are per-folder and NOT comparable between them.\n")
+} else {
+  cat(" (merged analyses skipped - RUN_VAF_MERGED is FALSE)\n")
 }
 cat(" results/05_dge/NoMHCIIFilter/\n")
 cat("   - umap_all*_by_cell_type.pdf\n")

@@ -50,7 +50,9 @@ FASTQ (R1/R2 per cell)
         │       ├── Violins of Ptprc / Col1a1 / Col1a2 / Pecam1 per cluster
         │       └── VAF / VRC / CD45pos reference profiles  ──┐
         │                                                       │
-        ├── Combined analysis (your cells + Clarke et al. mouse data)  │
+        ├── Merged analyses — one folder per MERGE_SPECS entry        │
+        │       │     Combined (all plates) | NOD_NOD2_Clarke (NOD + NOD2)
+        │       │     each rebuilds its own gene set; cluster IDs NOT shared
         │       ├── Combined UMAP (by Leiden cluster + by strain/population)
         │       ├── Per-strain panels on the merged UMAP
         │       ├── Per-cell UMAP coordinate CSV (traceable back to plate/condition)
@@ -255,6 +257,7 @@ results/
 │   │   ├── cell_identity_merged_clusters.xlsx
 │   │   ├── VAF_VRC_correlation_merged_clusters.xlsx
 │   │   └── MCA_celltype_correlation_merged_clusters.xlsx
+│   ├── NOD_NOD2_Clarke/                           (same file set as Combined/, NOD + NOD2 + Clarke only)
 │   └── NoMHCIIFilter/
 │       ├── umap_all514_by_cell_type.pdf               (cell count is derived)
 │       ├── umap_coordinates_by_cell.csv               (per-cell UMAP coords + cell type/plate/condition)
@@ -988,15 +991,72 @@ first and produced two concrete failures:
 > filtered analyses are unaffected — they retain more reference wells because
 > the MHCII filter removed the shallow ones for different reasons.
 
-### Combined analysis
+### Merged analyses (`MERGE_SPECS`)
 
-Merges your MHCII-filtered VST data with Clarke et al. 2025 mouse cells
-(GSE292898, 147/188 cells passing the MHCII gate). Clarke cells are processed
-through independent DESeq2 VST then **limma batch correction**
-(`removeBatchEffect`) is applied to the merged matrix before embedding.
-Clarke cells are labeled as `Clarke2025 CD45pos`, `Clarke2025 VAF`, or
-`Clarke2025 VRC`. All combined_plots outputs are reproduced for this
-merged dataset. The other 5 output folders are completely unaffected.
+Each entry in `MERGE_SPECS` produces one folder that merges your MHCII-filtered
+VST data with Clarke et al. 2025 (GSE292898, 147/188 cells passing the MHCII
+gate). Clarke cells go through independent DESeq2 VST, then
+`limma::removeBatchEffect` is applied to the merged matrix before embedding, and
+they are labelled `Clarke2025 CD45pos` / `VAF` / `VRC`. Clarke is always
+included — it is the reference the clusters are scored against — so a spec's
+`strains` lists only which of *your* plates go in.
+
+Current specs:
+
+| Folder | Your plates | Cells | Genes | Clusters |
+|---|---|---|---|---|
+| `Combined/` | all 7 | 755 | 10,218 | 5 |
+| `NOD_NOD2_Clarke/` | NOD, NOD2 | 312 | 12,553 | 4 |
+
+> ### The gene set is rebuilt per spec, not subset from `combined_expr`
+>
+> `combined_expr` is the intersection across **every** plate, so a gene one
+> plate honestly reports as zero is deleted for all of them. Carrying that into
+> a 2-plate analysis would let plates you deliberately excluded keep shrinking
+> the gene set — NODCD31 is a pure CD31 sort with no fibroblasts and zeroes out
+> `Col1a1`/`Col1a2`, which has no business constraining a NOD-vs-NOD2
+> comparison.
+>
+> Each spec therefore re-intersects from `all_expr_list` over its own plates
+> only, exactly as the all-plate path does. **A subset gets a larger gene set,
+> not a smaller one:** NOD + NOD2 share **14,747** genes against 11,759 across
+> all seven, and the merge with Clarke keeps 12,553 against 10,218.
+>
+> **Consequence: cluster IDs are per-folder and not comparable between them.**
+> Different gene set → different HVGs → different PCs → different Leiden
+> partition. These are independent analyses that share a reference, not
+> re-colourings of one embedding. Cluster 2 in one folder has no relationship to
+> cluster 2 in another. The script prints this warning at the end of every run.
+
+**`NOD_NOD2_Clarke/` scores better than `Combined/` on every confident call**,
+which is what you would expect from dropping six heterogeneous sort gates and
+3 of 8 batches:
+
+| | Combined | NOD_NOD2_Clarke |
+|---|---|---|
+| VRC | 0.850 | **0.903** |
+| VAF | 0.808 | **0.854** |
+| CD45pos | 0.819 | **0.837** |
+| Unresolved cluster | 0.400 (far below the 0.50 floor) | 0.494 (just below) |
+
+It also fixes the single-source-cluster problem. In `Combined/`, cluster 5 is
+56.8% NODPDL1_2 and draws on only 4 of 8 plates. In `NOD_NOD2_Clarke/` **every
+cluster draws from all three sources**:
+
+| Cluster | n | Clarke2025 | NOD | NOD2 | Call |
+|---|---|---|---|---|---|
+| 1 | 117 | 49 | 47 | 21 | CD45pos (r 0.837) |
+| 2 | 44 | 12 | 16 | 16 | *unresolved* |
+| 3 | 46 | 29 | 6 | 11 | VAF (r 0.854) |
+| 4 | 105 | 57 | 15 | 33 | VRC (r 0.903) |
+
+Cluster 2 is still uncalled, but it is now a genuinely mixed population sitting
+just under the confidence floor rather than one plate's shallow cells — note it
+holds equal numbers of NOD and NOD2 cells.
+
+**Adding a spec** is one line in `MERGE_SPECS`; the plate names must match
+`strain` in `data/metadata.csv`, and an unknown name is reported and skipped
+rather than failing the run.
 
 ---
 
@@ -1125,8 +1185,18 @@ matrix. Constant genes are held out and re-attached unchanged.
 RUN_PER_STRAIN_PLOTS <- FALSE   # results/05_dge/<STRAIN>_plots/
 RUN_COMBINED_PLOTS   <- FALSE   # results/05_dge/combined_plots/
 RUN_CLARKEONLY       <- TRUE    # results/05_dge/ClarkeOnly/   (runs FIRST)
-RUN_VAF_MERGED       <- TRUE    # results/05_dge/Combined/
+RUN_VAF_MERGED       <- TRUE    # the merged analyses; one folder per MERGE_SPECS entry
 RUN_NOMHCIIFILTER    <- TRUE    # results/05_dge/NoMHCIIFilter/
+```
+
+`RUN_VAF_MERGED` is a single on/off for **all** merged analyses. Which folders
+it produces is `MERGE_SPECS`:
+
+```r
+MERGE_SPECS <- list(
+  list(name = "Combined",        strains = NULL),            # every plate
+  list(name = "NOD_NOD2_Clarke", strains = c("NOD", "NOD2"))
+)
 ```
 
 Turning the first two off is a real but modest win, and it is worth being clear
@@ -1199,6 +1269,7 @@ as before.
 | `BATCH_CORRECT_BY_PLATE` | TRUE | Per-plate `removeBatchEffect` on the merged and NoMHCIIFilter embeddings |
 | `MIN_CORR_R` | 0.50 | VAF/VRC: minimum winning Pearson r before a call is reported |
 | `MIN_CORR_MARGIN` | 0.05 | VAF/VRC: minimum gap to the runner-up before a call is reported |
+| `MERGE_SPECS` | Combined (all plates), NOD_NOD2_Clarke (NOD + NOD2) | Which merged analyses to build. One folder per entry; `strains = NULL` means every plate. Clarke's cells are always included |
 | `RUN_CLARKEONLY` | TRUE | `results/05_dge/ClarkeOnly/` — Clarke data analysed alone. **Also builds the VAF/VRC reference the Combined analysis uses**, so switching it off silently downgrades Combined to the legacy k-means reference |
 | `CLARKE_LEIDEN_RESOLUTION` | 1.0 | Leiden granularity for ClarkeOnly only; `LEIDEN_RESOLUTION` governs everything else |
 | `CLARKE_VIOLIN_GENES` | Ptprc, Col1a1, Col1a2, Pecam1 | Genes given a per-cluster violin in ClarkeOnly |

@@ -19,7 +19,8 @@ Total cells in metadata:     660
 
   Metadata aligned to count matrix column order: 660 cells
 
-Symbol map loaded: 56941 entries
+Building symbol map from GTF (one-time, ~30s)...
+Symbol map built: 56941 genes
 
 Applying MHCII transcript filter (Clarke et al.: >= 1 of H2-Aa / H2-Ab1 detected at >= 1 count(s))
 Violin genes exempt from the per-plate count filter: 18 of 18 
@@ -216,9 +217,11 @@ ComplexHeatmap raster device: agg_png
 Running cell identity scoring against CellMarker 2.0...
   Downloading CellMarker 2.0 mouse table...
   Download failed: cannot open URL 'http://bio-bigdata.hrbmu.edu.cn/CellMarker/CellMarker_download_files/file/Cell_marker_Mouse.xlsx' 
-Warning message:
-In download.file(cm_url, cm_cache, mode = "wb", quiet = TRUE) :
-  URL 'http://bio-bigdata.hrbmu.edu.cn/CellMarker/CellMarker_download_files/file/Cell_marker_Mouse.xlsx': Timeout of 60 seconds was reached
+Warning messages:
+1: In download.file(cm_url, cm_cache, mode = "wb", quiet = TRUE) :
+  downloaded length 0 != reported length 153
+2: In download.file(cm_url, cm_cache, mode = "wb", quiet = TRUE) :
+  cannot open URL 'https://bio-bigdata.hrbmu.edu.cn/CellMarker/CellMarker_download_files/file/Cell_marker_Mouse.xlsx': HTTP status was '403 Forbidden'
   Using built-in curated marker set (CellMarker download unavailable)
   Built-in cell types: 20 
 
@@ -319,6 +322,11 @@ Running VAF/VRC correlation analysis (Clarke et al. 2025)...
 ==============================================================
 Building Combined analysis...
 ==============================================================
+
+--------------------------------------------------------------
+Merged analysis 'Combined': your plates = B6G7, B6MHCIIGFP, NOD, NOD2, NODCD31, NODPDL1, NODPDL1_2 (+ Clarke2025)
+--------------------------------------------------------------
+  Genes common across these plates: 11759  |  your cells: 608
 Loading Clarke et al. mouse count matrix...
 Clarke matrix: 45706 genes x 188 cells
 Clarke genes mappable to your Ensembl IDs: 10496 
@@ -387,11 +395,13 @@ Saved: VAF_VRC_correlation_merged_clusters.xlsx
 Running CellMarker cell identity scoring on merged clusters...
 Saved: cell_identity_merged_clusters.xlsx
 Running MCA cell type correlation on merged clusters...
+  Trying: https://github.com/rnabioco/clustifyrdata/raw/main/data/ref_MCA.rda 
+  Download successful
   ref_MCA loaded: 8601 genes x 713 cell types
   Common genes for MCA correlation: 7272 
   Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/Combined/MCA_celltype_correlation_merged_clusters.xlsx 
 
-Combined complete.
+Merged analysis 'Combined' complete.
 Output folder: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/Combined 
 Files written:
  - barplots_cluster_composition.pdf 
@@ -406,24 +416,95 @@ Files written:
  - umap_per_strain_on_merged.pdf 
  - VAF_VRC_correlation_merged_clusters.xlsx 
  - violin_plots_by_cluster.pdf 
-Warning messages:
-1: package ‘limma’ was built under R version 4.5.2 
-2: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Your cells + Clarke 2025 — 755 cells by Leiden cluster' in 'mbcsToSbcs': - substituted for — (U+2014)
-3: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Your cells + Clarke 2025 — 755 cells by strain & population' in 'mbcsToSbcs': - substituted for — (U+2014)
-4: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Strain & population — counts' in 'mbcsToSbcs': - substituted for — (U+2014)
-5: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Strain & population — proportions' in 'mbcsToSbcs': - substituted for — (U+2014)
-6: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Strain — counts' in 'mbcsToSbcs': - substituted for — (U+2014)
-7: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Strain — proportions' in 'mbcsToSbcs': - substituted for — (U+2014)
-8: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Merged cluster composition — 5 clusters | n=755 cells' in 'mbcsToSbcs': - substituted for — (U+2014)
-9: In grid.Call.graphics(C_text, as.graphicsAnnot(x$label), x$x, x$y,  :
-  for 'Merged cluster marker genes — 71 genes x 755 cells' in 'mbcsToSbcs': - substituted for — (U+2014)
+
+--------------------------------------------------------------
+Merged analysis 'NOD_NOD2_Clarke': your plates = NOD, NOD2 (+ Clarke2025)
+--------------------------------------------------------------
+  Genes common across these plates: 14747  |  your cells: 165
+Loading Clarke et al. mouse count matrix...
+Clarke matrix: 45706 genes x 188 cells
+Clarke genes mappable to your Ensembl IDs: 13046 
+Applying MHCII filter to Clarke cells...
+Clarke cells passing MHCII filter: 147 / 188 
+Running DESeq2 VST on Clarke cells...
+  VAF orientation markers found: 6 / 6 ( Col1a1,Col1a2,Timp3,Spp1,Thy1,Pdpn )
+  VRC orientation markers found: 6 / 6 ( Pecam1,Eng,Cdh5,Kdr,Tie1,Vwf )
+  Orientation scores (VAF minus VRC) - cluster1: -3.482 | cluster2: 0.481 
+Clarke VAF cells: 66 | VRC cells: 59 
+converting counts to integer mode
+Clarke VST complete: 12553 genes x 147 cells
+Common Ensembl IDs for merged matrix: 12553 
+Merged matrix (pre-correction): 12553 genes x 312 cells
+Merged metadata: 312 rows
+  Batch composition by plate:
+
+Clarke2025        NOD       NOD2 
+       147         84         81 
+  [merged] value range before: [-4.52, 22.19]  after: [-6.06, 22.47]
+  [merged] corrected across 3 plates, preserving 4 harmonised condition(s)
+      plates: Clarke2025, NOD, NOD2
+Merged matrix (post-correction): 12553 genes x 312 cells
+Running HVG selection on merged matrix...
+Running PCA + UMAP (merged)...
+    PCs selected: 95 (80.2% variance explained)
+Running all-gene PCA for Leiden clustering (merged)...
+PCs selected (merged all-gene): 113 (80.3% variance)
+Running Leiden clustering (merged)...
+Clusters found: 4 
+Saved: umap_coordinates_by_cell.csv ( 312 cells )
+Saved: umap_merged_by_cluster.pdf
+Saved: umap_merged_by_strain_population.pdf
+Saved: umap_per_strain_on_merged.pdf
+Generating merged cluster bar charts...
+Saved: barplots_cluster_composition.pdf
+Running Wilcoxon marker gene analysis on merged clusters...
+Saved: cluster_marker_genes.xlsx
+
+Running pairwise cluster contrasts vs VAF / VRC reference clusters...
+  VAF reference: cluster 3 (29/66 cells, 43.9%)
+  VRC reference: cluster 4 (57/59 cells, 96.6%)
+    Cluster 1 vs VAF (cluster 3): 1310 up, 2817 down
+    Cluster 2 vs VAF (cluster 3): 245 up, 7461 down
+    Cluster 4 vs VAF (cluster 3): 1179 up, 2261 down
+    Cluster 1 vs VRC (cluster 4): 1027 up, 1400 down
+    Cluster 2 vs VRC (cluster 4): 138 up, 7269 down
+    Cluster 3 vs VRC (cluster 4): 2261 up, 1179 down
+Saved: cluster_pairwise_contrasts.xlsx
+Generating merged cluster marker heatmap...
+Heatmap genes: 55 
+'magick' package is suggested to install to give better rasterization.
+
+Set `ht_opt$message = FALSE` to turn off this message.
+Saved: heatmap_cluster_markers.pdf
+Generating merged cluster violin plots...
+Saved: violin_plots_by_cluster.pdf
+Running VAF/VRC correlation on merged clusters...
+Building CD45- MHCII+ cluster distribution sheet...
+  Sheet added: CD45neg_Cluster_Distribution - 272 CD45- cells tabulated
+Saved: VAF_VRC_correlation_merged_clusters.xlsx
+Running CellMarker cell identity scoring on merged clusters...
+Saved: cell_identity_merged_clusters.xlsx
+Running MCA cell type correlation on merged clusters...
+  ref_MCA loaded: 8601 genes x 713 cell types
+  Common genes for MCA correlation: 7719 
+  Saved: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_NOD2_Clarke/MCA_celltype_correlation_merged_clusters.xlsx 
+
+Merged analysis 'NOD_NOD2_Clarke' complete.
+Output folder: /Users/zachortega/Desktop/MS_SMARTseq_Pipeline/results/05_dge/NOD_NOD2_Clarke 
+Files written:
+ - barplots_cluster_composition.pdf 
+ - cell_identity_merged_clusters.xlsx 
+ - cluster_marker_genes.xlsx 
+ - cluster_pairwise_contrasts.xlsx 
+ - heatmap_cluster_markers.pdf 
+ - MCA_celltype_correlation_merged_clusters.xlsx 
+ - umap_coordinates_by_cell.csv 
+ - umap_merged_by_cluster.pdf 
+ - umap_merged_by_strain_population.pdf 
+ - umap_per_strain_on_merged.pdf 
+ - VAF_VRC_correlation_merged_clusters.xlsx 
+ - violin_plots_by_cluster.pdf 
+There were 21 warnings (use warnings() to see them)
 
 ==============================================================
 Building NoMHCIIFilter UMAP (all sorted cells, MHCII-agnostic)...
@@ -592,6 +673,9 @@ Writing per-cell expression workbook...
 All outputs complete. Output structure:
  (per-plate <STRAIN>_plots/ skipped - RUN_PER_STRAIN_PLOTS is FALSE)
  (combined_plots/ skipped - RUN_COMBINED_PLOTS is FALSE)
+ results/05_dge/Combined/  (your plates: all + Clarke2025)
+ results/05_dge/NOD_NOD2_Clarke/  (your plates: NOD, NOD2 + Clarke2025)
+   NOTE: cluster IDs are per-folder and NOT comparable between them.
  results/05_dge/NoMHCIIFilter/
    - umap_all*_by_cell_type.pdf
    - umap_coordinates_by_cell.csv  (per-cell UMAP coords + plate/condition)
