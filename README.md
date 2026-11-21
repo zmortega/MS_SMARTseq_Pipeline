@@ -51,7 +51,7 @@ FASTQ (R1/R2 per cell)
         │       └── VAF / VRC / CD45pos reference profiles  ──┐
         │                                                       │
         ├── Merged analyses — one folder per MERGE_SPECS entry        │
-        │       │     Combined (all plates) | NOD_NOD2_Clarke (NOD + NOD2)
+        │       │     Combined (all) | NOD_NOD2_Clarke | Munich2026 (frozen)
         │       │     each rebuilds its own gene set; cluster IDs NOT shared
         │       ├── Combined UMAP (by Leiden cluster + by strain/population)
         │       ├── Per-strain panels on the merged UMAP
@@ -258,6 +258,9 @@ results/
 │   │   ├── VAF_VRC_correlation_merged_clusters.xlsx
 │   │   └── MCA_celltype_correlation_merged_clusters.xlsx
 │   ├── NOD_NOD2_Clarke/                           (same file set as Combined/, NOD + NOD2 + Clarke only)
+│   ├── Munich2026/                                (FROZEN snapshot — do not add plates)
+│   │   ├── SNAPSHOT_MANIFEST.txt                  (what actually went in: plates, cells, genes, clusters)
+│   │   └── ... (same file set as Combined/)
 │   └── NoMHCIIFilter/
 │       ├── umap_all514_by_cell_type.pdf               (cell count is derived)
 │       ├── umap_coordinates_by_cell.csv               (per-cell UMAP coords + cell type/plate/condition)
@@ -1007,6 +1010,7 @@ Current specs:
 |---|---|---|---|---|
 | `Combined/` | all 7 | 755 | 10,218 | 5 |
 | `NOD_NOD2_Clarke/` | NOD, NOD2 | 312 | 12,553 | 4 |
+| `Munich2026/` ❄️ | 6 (all but NODPDL1_2) | 661 | 10,450 | 4 |
 
 > ### The gene set is rebuilt per spec, not subset from `combined_expr`
 >
@@ -1057,6 +1061,60 @@ holds equal numbers of NOD and NOD2 cells.
 **Adding a spec** is one line in `MERGE_SPECS`; the plate names must match
 `strain` in `data/metadata.csv`, and an unknown name is reported and skipped
 rather than failing the run.
+
+### ❄️ Frozen snapshots (`frozen = TRUE`)
+
+`Munich2026/` is a **fixed progress snapshot**, created 2026-11-20 for a Munich
+presentation. Its roster is the pipeline as it stood *before* NODPDL1_2:
+`B6G7, B6MHCIIGFP, NOD, NOD2, NODCD31, NODPDL1` (+ Clarke2025).
+
+> **Do not add plates to a frozen spec.** When new data arrives it goes into
+> `Combined` (whose `strains = NULL` picks up everything automatically) or into
+> a new spec. A frozen folder's whole value is that it does **not** track the
+> latest data: the figures are in a talk, and if the roster shifts, the
+> clustering, cluster numbering and gene set shift with it, so the slides stop
+> matching the analysis that produced them.
+
+This is enforced in code, not by convention. A frozen spec's plate list is
+checked at runtime against `FROZEN_ROSTERS`, a deliberately **separate** list,
+so one careless edit is caught by the other:
+
+```r
+list(name    = "Munich2026",
+     strains = c("B6G7", "B6MHCIIGFP", "NOD", "NOD2", "NODCD31", "NODPDL1"),
+     frozen  = TRUE)
+
+FROZEN_ROSTERS <- list(
+  Munich2026 = c("B6G7", "B6MHCIIGFP", "NOD", "NOD2", "NODCD31", "NODPDL1")
+)
+```
+
+Any drift **hard-stops the run** with an error naming both rosters, rather than
+quietly rebuilding the snapshot under the same name. Verified against adding a
+plate, removing one, swapping one, and marking a spec frozen with no recorded
+roster; plate order is correctly ignored.
+
+Every spec also writes `SNAPSHOT_MANIFEST.txt` recording the plates, per-plate
+cell counts, gene counts, cluster count and generation time — so a run that
+differs can be caught by diffing one file instead of eyeballing figures.
+
+**Munich2026 vs Combined.** Dropping one plate barely moves the correlations,
+which is the reassuring result:
+
+| | Combined (7 plates) | Munich2026 (6 plates) |
+|---|---|---|
+| VRC | 0.850 | 0.846 |
+| CD45pos | 0.819 | 0.812 |
+| VAF | 0.808 | 0.812 |
+| Clusters | 5 | **4** |
+
+The cluster count drops because **Combined's cluster 5 was 56.8% NODPDL1_2**;
+remove that plate and the cluster largely goes with it. The remaining four are
+well mixed — three draw from all 7 sources, one from 6.
+
+Cluster 3 (n=92) is the uncalled one, at r 0.390, and it contains **zero Clarke
+cells** — the same signature as Combined's unresolved cluster. Treat it as the
+low-complexity/ambient compartment rather than a population.
 
 ---
 
@@ -1269,7 +1327,8 @@ as before.
 | `BATCH_CORRECT_BY_PLATE` | TRUE | Per-plate `removeBatchEffect` on the merged and NoMHCIIFilter embeddings |
 | `MIN_CORR_R` | 0.50 | VAF/VRC: minimum winning Pearson r before a call is reported |
 | `MIN_CORR_MARGIN` | 0.05 | VAF/VRC: minimum gap to the runner-up before a call is reported |
-| `MERGE_SPECS` | Combined (all plates), NOD_NOD2_Clarke (NOD + NOD2) | Which merged analyses to build. One folder per entry; `strains = NULL` means every plate. Clarke's cells are always included |
+| `MERGE_SPECS` | Combined, NOD_NOD2_Clarke, Munich2026 | Which merged analyses to build. One folder per entry; `strains = NULL` means every plate. Clarke's cells are always included |
+| `FROZEN_ROSTERS` | Munich2026 | Recorded plate roster for each `frozen = TRUE` spec. Drift hard-stops the run |
 | `RUN_CLARKEONLY` | TRUE | `results/05_dge/ClarkeOnly/` — Clarke data analysed alone. **Also builds the VAF/VRC reference the Combined analysis uses**, so switching it off silently downgrades Combined to the legacy k-means reference |
 | `CLARKE_LEIDEN_RESOLUTION` | 1.0 | Leiden granularity for ClarkeOnly only; `LEIDEN_RESOLUTION` governs everything else |
 | `CLARKE_VIOLIN_GENES` | Ptprc, Col1a1, Col1a2, Pecam1 | Genes given a per-cluster violin in ClarkeOnly |

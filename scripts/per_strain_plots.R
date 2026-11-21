@@ -384,9 +384,39 @@ RUN_CLARKEONLY        <- TRUE    # results/05_dge/ClarkeOnly/
 # specs. They are separate analyses that happen to share a reference, not
 # subsets of one clustering, and cluster 2 in one folder has no relationship to
 # cluster 2 in another.
+#
+# `frozen = TRUE` marks a spec whose plate roster must never change. Its plate
+# list is checked against `strains` at runtime and the run HARD-STOPS on any
+# drift, rather than quietly producing a different analysis under the same name.
+# See the FROZEN SNAPSHOTS note below.
 MERGE_SPECS <- list(
   list(name = "Combined",        strains = NULL),
-  list(name = "NOD_NOD2_Clarke", strains = c("NOD", "NOD2"))
+  list(name = "NOD_NOD2_Clarke", strains = c("NOD", "NOD2")),
+
+  # ---------------------------------------------------------------------------
+  # FROZEN SNAPSHOT -- DO NOT ADD PLATES TO THIS SPEC.
+  # ---------------------------------------------------------------------------
+  # Zach set this on 2026-11-20 as a fixed progress snapshot for a Munich
+  # presentation. It is the plate roster as it stood BEFORE NODPDL1_2, and it is
+  # meant to keep producing the same figures no matter what is sequenced later.
+  #
+  # The instruction was explicit: nothing else is ever added to this analysis
+  # unless Zach specifically asks. If you are adding a new plate to this
+  # pipeline, add it to Combined and to any new spec you like -- NOT here.
+  # Leave this list exactly as it is.
+  #
+  # The `frozen` flag is enforced in code, so editing this list without also
+  # editing FROZEN_ROSTERS below will stop the run with an explanatory error.
+  list(name    = "Munich2026",
+       strains = c("B6G7", "B6MHCIIGFP", "NOD", "NOD2", "NODCD31", "NODPDL1"),
+       frozen  = TRUE)
+)
+
+# The independently recorded roster each frozen spec is checked against. Kept
+# separate from MERGE_SPECS on purpose: a single careless edit to one list is
+# then caught by the other, instead of silently redefining the snapshot.
+FROZEN_ROSTERS <- list(
+  Munich2026 = c("B6G7", "B6MHCIIGFP", "NOD", "NOD2", "NODCD31", "NODPDL1")
 )
 
 # Genes given a per-cluster violin panel in the ClarkeOnly analysis.
@@ -3116,9 +3146,39 @@ if (!RUN_VAF_MERGED) {
       next
     }
 
+    # -- Frozen-snapshot enforcement ------------------------------------------
+    # A frozen spec must match its independently recorded roster exactly. This
+    # stops the run rather than warning: the whole point of a frozen snapshot is
+    # that it cannot drift, and a warning in a 5,000-line log is not a guard.
+    mg_frozen <- isTRUE(mg$frozen)
+    if (mg_frozen) {
+      mg_expect <- FROZEN_ROSTERS[[mg$name]]
+      if (is.null(mg_expect)) {
+        stop("MERGE_SPECS marks '", mg$name, "' as frozen but FROZEN_ROSTERS has ",
+             "no entry for it. A frozen snapshot needs a recorded roster to be ",
+             "checked against -- add one, or drop the frozen flag.")
+      }
+      if (!identical(sort(mg_strains), sort(mg_expect))) {
+        stop("FROZEN SNAPSHOT '", mg$name, "' HAS BEEN ALTERED.\n",
+             "  recorded roster : ", paste(sort(mg_expect),  collapse=", "), "\n",
+             "  spec now asks for: ", paste(sort(mg_strains), collapse=", "), "\n",
+             "This analysis was deliberately frozen and must not gain or lose ",
+             "plates. If this change is intended, Zach has to say so explicitly; ",
+             "then update BOTH MERGE_SPECS and FROZEN_ROSTERS. If you are adding ",
+             "a new plate to the pipeline, add it to Combined or to a new spec ",
+             "instead -- not to a frozen one.")
+      }
+      # Cells can also drift underneath a fixed plate list, via metadata edits or
+      # a re-run of upstream counting. That does not stop the run, but it is
+      # recorded in the manifest so the snapshot is never silently different.
+      cat("  [frozen] roster verified against FROZEN_ROSTERS: ",
+          paste(sort(mg_expect), collapse=", "), "\n", sep="")
+    }
+
     cat("\n--------------------------------------------------------------\n")
     cat("Merged analysis '", mg$name, "': your plates = ",
-        paste(mg_strains, collapse=", "), " (+ Clarke2025)\n", sep="")
+        paste(mg_strains, collapse=", "), " (+ Clarke2025)",
+        if (mg_frozen) "  [FROZEN SNAPSHOT]" else "", "\n", sep="")
     cat("--------------------------------------------------------------\n")
 
     # Re-intersect over THIS spec's plates only (see MERGE_SPECS comment).
@@ -4159,6 +4219,32 @@ if (!RUN_VAF_MERGED) {
                                      "MCA_celltype_correlation_merged_clusters.xlsx"),
       label             = "merged"
     )
+
+    # -- Provenance manifest ---------------------------------------------------
+    # Written for every spec, but it is the reason frozen snapshots are
+    # trustworthy: it records what actually went in, so a later run that differs
+    # can be spotted by diffing this file rather than by eyeballing figures.
+    mg_manifest <- c(
+      paste0("analysis:        ", mg$name),
+      paste0("frozen:          ", if (mg_frozen) "YES - do not add plates" else "no"),
+      paste0("generated:       ", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
+      "",
+      paste0("your plates:     ", paste(sort(mg_strains), collapse=", ")),
+      paste0("your cells:      ", ncol(cmb_expr)),
+      paste0("Clarke cells:    ", ncol(expr_clarke)),
+      paste0("total cells:     ", ncol(merged_expr)),
+      paste0("genes (plates):  ", length(mg_genes)),
+      paste0("genes (merged):  ", nrow(merged_expr)),
+      paste0("clusters:        ", n_clust_m),
+      "",
+      "cells per plate:",
+      paste0("  ", names(table(meta_merged_ordered$strain)), ": ",
+             as.integer(table(meta_merged_ordered$strain))),
+      "",
+      "NOTE: cluster IDs are specific to this folder. They are derived from this",
+      "folder's own gene set and are NOT comparable with any other analysis."
+    )
+    writeLines(mg_manifest, file.path(vaf_out_dir, "SNAPSHOT_MANIFEST.txt"))
 
     cat("\nMerged analysis '", mg$name, "' complete.\n", sep="")
     cat("Output folder:", vaf_out_dir, "\n")
